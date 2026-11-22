@@ -75,19 +75,75 @@ const fmt = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.f
 const db = x => (x > 1e-6 ? 20 * Math.log10(x) : -120)
 
 const NOTE_NAMES_SHARP = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-const GUITAR_STRINGS = [
-  { label: 'E2 (6)', freq: 82.41 },
-  { label: 'A2 (5)', freq: 110.00 },
-  { label: 'D3 (4)', freq: 146.83 },
-  { label: 'G3 (3)', freq: 196.00 },
-  { label: 'B3 (2)', freq: 246.94 },
-  { label: 'E4 (1)', freq: 329.63 },
-]
-function detectPitchAutocorr(buf, sr) {
+
+const TUNING_INSTRUMENTS = {
+  guitar: {
+    name: 'Gitar (6 Senar)',
+    minHz: 65,
+    maxHz: 1100,
+    notes: [
+      { label: 'E2 (6)', note: 'E', octave: 2, freq: 82.41 },
+      { label: 'A2 (5)', note: 'A', octave: 2, freq: 110.00 },
+      { label: 'D3 (4)', note: 'D', octave: 3, freq: 146.83 },
+      { label: 'G3 (3)', note: 'G', octave: 3, freq: 196.00 },
+      { label: 'B3 (2)', note: 'B', octave: 3, freq: 246.94 },
+      { label: 'E4 (1)', note: 'E', octave: 4, freq: 329.63 },
+    ],
+  },
+  bass: {
+    name: 'Bass (4 Senar)',
+    minHz: 32,
+    maxHz: 520,
+    notes: [
+      { label: 'E1 (4)', note: 'E', octave: 1, freq: 41.20 },
+      { label: 'A1 (3)', note: 'A', octave: 1, freq: 55.00 },
+      { label: 'D2 (2)', note: 'D', octave: 2, freq: 73.42 },
+      { label: 'G2 (1)', note: 'G', octave: 2, freq: 98.00 },
+    ],
+  },
+  ukulele: {
+    name: 'Ukulele (GCEA)',
+    minHz: 180,
+    maxHz: 1200,
+    notes: [
+      { label: 'G4 (4)', note: 'G', octave: 4, freq: 392.00 },
+      { label: 'C4 (3)', note: 'C', octave: 4, freq: 261.63 },
+      { label: 'E4 (2)', note: 'E', octave: 4, freq: 329.63 },
+      { label: 'A4 (1)', note: 'A', octave: 4, freq: 440.00 },
+    ],
+  },
+  violin: {
+    name: 'Biola / Violin',
+    minHz: 175,
+    maxHz: 1800,
+    notes: [
+      { label: 'G3', note: 'G', octave: 3, freq: 196.00 },
+      { label: 'D4', note: 'D', octave: 4, freq: 293.66 },
+      { label: 'A4', note: 'A', octave: 4, freq: 440.00 },
+      { label: 'E5', note: 'E', octave: 5, freq: 659.25 },
+    ],
+  },
+  chromatic: {
+    name: 'Kromatik / Vokal',
+    minHz: 55,
+    maxHz: 2000,
+    notes: [
+      { label: 'C3', note: 'C', octave: 3, freq: 130.81 },
+      { label: 'E3', note: 'E', octave: 3, freq: 164.81 },
+      { label: 'G3', note: 'G', octave: 3, freq: 196.00 },
+      { label: 'A3', note: 'A', octave: 3, freq: 220.00 },
+      { label: 'C4', note: 'C', octave: 4, freq: 261.63 },
+      { label: 'A4', note: 'A', octave: 4, freq: 440.00 },
+    ],
+  },
+}
+
+// YIN + parabolic interpolation pitch detector untuk akurasi frekuensi lebih tinggi
+function detectPitchAccurate(buf, sr, a4Ref = 440, minHz = 40, maxHz = 1600) {
   let rms = 0
   for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i]
   rms = Math.sqrt(rms / buf.length)
-  if (rms < 0.012) return null
+  if (rms < 0.009) return null
 
   let mean = 0
   for (let i = 0; i < buf.length; i++) mean += buf[i]
@@ -96,35 +152,73 @@ function detectPitchAutocorr(buf, sr) {
   const n = buf.length
   const x = new Float32Array(n)
   for (let i = 0; i < n; i++) {
-    const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1))
+    const w = 0.54 - 0.46 * Math.cos((2 * Math.PI * i) / (n - 1))
     x[i] = (buf[i] - mean) * w
   }
 
-  const minLag = Math.max(2, Math.floor(sr / 1100))
-  const maxLag = Math.min(n - 1, Math.ceil(sr / 65))
-  let bestLag = -1
-  let bestCorr = -1
+  const maxTau = Math.min(Math.floor(n / 2), Math.max(4, Math.ceil(sr / Math.max(25, minHz))))
+  const minTau = Math.max(2, Math.floor(sr / Math.min(sr / 3, maxHz)))
+  if (maxTau <= minTau + 2) return null
 
-  for (let lag = minLag; lag <= maxLag; lag++) {
-    let sum = 0, s1 = 0, s2 = 0
-    for (let i = 0; i < n - lag; i++) {
-      const a = x[i], b = x[i + lag]
-      sum += a * b
-      s1 += a * a
-      s2 += b * b
+  // Difference function d(tau)
+  const diff = new Float64Array(maxTau + 1)
+  for (let tau = 1; tau <= maxTau; tau++) {
+    let s = 0
+    for (let j = 0; j < n - tau; j++) {
+      const d = x[j] - x[j + tau]
+      s += d * d
     }
-    const denom = Math.sqrt(s1 * s2)
-    if (denom > 1e-8) {
-      const c = sum / denom
-      if (c > bestCorr) { bestCorr = c; bestLag = lag }
+    diff[tau] = s
+  }
+
+  // Cumulative mean normalized difference d'(tau)
+  const cmnd = new Float64Array(maxTau + 1)
+  cmnd[0] = 1
+  let runningSum = 0
+  for (let tau = 1; tau <= maxTau; tau++) {
+    runningSum += diff[tau]
+    cmnd[tau] = runningSum > 1e-12 ? (diff[tau] * tau) / runningSum : 1
+  }
+
+  // Cari lembah pertama di bawah threshold (0.14) atau lembah global terbaik
+  const threshold = 0.14
+  let tauEstimate = -1
+  for (let tau = minTau; tau < maxTau; tau++) {
+    if (cmnd[tau] < threshold) {
+      while (tau + 1 < maxTau && cmnd[tau + 1] < cmnd[tau]) tau++
+      tauEstimate = tau
+      break
     }
   }
 
-  if (bestLag <= 0 || bestCorr < 0.72) return null
-  const freq = sr / bestLag
-  if (freq < 65 || freq > 1100) return null
+  if (tauEstimate === -1) {
+    let bestVal = Infinity
+    for (let tau = minTau; tau < maxTau; tau++) {
+      if (cmnd[tau] < bestVal) {
+        bestVal = cmnd[tau]
+        tauEstimate = tau
+      }
+    }
+    if (bestVal > 0.45 || tauEstimate < minTau) return null
+  }
 
-  const midiFloat = 69 + 12 * Math.log2(freq / 440)
+  // Parabolic interpolation di sekitar tauEstimate untuk presisi sub-cent
+  let betterTau = tauEstimate
+  if (tauEstimate > minTau && tauEstimate < maxTau - 1) {
+    const s0 = cmnd[tauEstimate - 1]
+    const s1 = cmnd[tauEstimate]
+    const s2 = cmnd[tauEstimate + 1]
+    const denom = 2 * (s0 - 2 * s1 + s2)
+    if (Math.abs(denom) > 1e-12) {
+      const delta = (s0 - s2) / denom
+      if (Math.abs(delta) <= 1) betterTau = tauEstimate + delta
+    }
+  }
+
+  const freq = sr / betterTau
+  if (!Number.isFinite(freq) || freq < minHz || freq > maxHz) return null
+
+  const midiFloat = 69 + 12 * Math.log2(freq / a4Ref)
   const midiNearest = Math.round(midiFloat)
   const cents = Math.round((midiFloat - midiNearest) * 100)
   const noteIdx = ((midiNearest % 12) + 12) % 12
@@ -135,6 +229,7 @@ function detectPitchAutocorr(buf, sr) {
     note: NOTE_NAMES_SHARP[noteIdx],
     octave,
     cents: Math.max(-50, Math.min(50, cents)),
+    clarity: Math.max(0, Math.min(1, 1 - cmnd[tauEstimate])),
   }
 }
 
@@ -485,19 +580,38 @@ const Seg = ({ value, options, onChange }) => (
 
 const BAND_COLORS = ['#60a5fa', '#38bdf8', '#34d399', '#fbbf24', '#fb7185', '#c084fc']
 
+function smoothSplinePath(pts) {
+  if (!pts.length) return ''
+  if (pts.length === 1) return `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`
+  let d = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i === 0 ? i : i - 1]
+    const p1 = pts[i]
+    const p2 = pts[i + 1]
+    const p3 = pts[i + 2 < pts.length ? i + 2 : i + 1]
+    const cp1x = p1[0] + (p2[0] - p0[0]) / 6
+    const cp1y = p1[1] + (p2[1] - p0[1]) / 6
+    const cp2x = p2[0] - (p3[0] - p1[0]) / 6
+    const cp2y = p2[1] - (p3[1] - p1[1]) / 6
+    d += ` C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`
+  }
+  return d
+}
+
 function EqPanel({ bands, setBands, eqOn, setEqOn, scope, setScope, sel, setSel, flash, specCurve }) {
-  const W = 760, H = 300
+  const W = 780, H = 312
   const svg = useRef(null), drag = useRef(null)
   const [hoverIdx, setHoverIdx] = useState(null)
   const [showIndiv, setShowIndiv] = useState(true)
   const [showSpec, setShowSpec] = useState(true)
+  const [hoverProbe, setHoverProbe] = useState(null)
 
   const X = f => fx(f) * W
-  const Y = g => H / 2 - (g / GR) * (H / 2 - 14)
+  const Y = g => H / 2 - (g / GR) * (H / 2 - 16)
   const upd = (i, p) => setBands(b => b.map((x, j) => (j === i ? { ...x, ...p } : x)))
 
   const { freqs, tot, indiv } = useMemo(() => {
-    const base = eqResponse(bands)
+    const base = eqResponse(bands, 220)
     if (!respCtx) respCtx = new OfflineAudioContext(1, 1, 48000)
     const perBand = bands.map((b, i) => {
       const f = respCtx.createBiquadFilter(), m = new Float32Array(base.freqs.length), p = new Float32Array(base.freqs.length)
@@ -508,40 +622,49 @@ function EqPanel({ bands, setBands, eqOn, setEqOn, scope, setScope, sel, setSel,
     return { ...base, indiv: perBand }
   }, [bands])
 
-  const buildPath = arr =>
-    'M' + Array.from(freqs, (f, k) => `${X(f).toFixed(1)},${Y(Math.max(-GR, Math.min(GR, arr[k]))).toFixed(1)}`).join(' L')
+  const buildSmoothCurve = arr => {
+    const pts = Array.from(freqs, (f, k) => [
+      X(f),
+      Y(Math.max(-GR, Math.min(GR, arr[k]))),
+    ])
+    return smoothSplinePath(pts)
+  }
 
-  const line = useMemo(() => buildPath(tot), [tot, freqs]) // eslint-disable-line react-hooks/exhaustive-deps
-  const indivLines = useMemo(() => indiv.map(arr => buildPath(arr)), [indiv, freqs]) // eslint-disable-line react-hooks/exhaustive-deps
+  const line = useMemo(() => buildSmoothCurve(tot), [tot, freqs]) // eslint-disable-line react-hooks/exhaustive-deps
+  const indivLines = useMemo(() => indiv.map(arr => buildSmoothCurve(arr)), [indiv, freqs]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const specArea = useMemo(() => {
-    if (!showSpec || !specCurve || !specCurve.length) return ''
-    const pts = specCurve.map((val, idx) => {
-      const x = (idx / (specCurve.length - 1)) * W
-      const y = H - Math.max(0, Math.min(1, val)) * (H - 16)
-      return `${x.toFixed(1)},${y.toFixed(1)}`
-    })
-    return `M0,${H} L${pts.join(' L')} L${W},${H} Z`
+  const { specArea, specTopLine } = useMemo(() => {
+    if (!showSpec || !specCurve || !specCurve.length) return { specArea: '', specTopLine: '' }
+    const pts = specCurve.map((val, idx) => [
+      (idx / (specCurve.length - 1)) * W,
+      H - 20 - Math.max(0, Math.min(1, val)) * (H - 42),
+    ])
+    const spline = smoothSplinePath(pts)
+    return {
+      specTopLine: spline,
+      specArea: `${spline} L${W},${H - 20} L0,${H - 20} Z`,
+    }
   }, [specCurve, showSpec])
 
-  const specTopLine = useMemo(() => {
-    if (!showSpec || !specCurve || !specCurve.length) return ''
-    return 'M' + specCurve.map((val, idx) => {
-      const x = (idx / (specCurve.length - 1)) * W
-      const y = H - Math.max(0, Math.min(1, val)) * (H - 16)
-      return `${x.toFixed(1)},${y.toFixed(1)}`
-    }).join(' L')
-  }, [specCurve, showSpec])
-
-  const move = e => {
-    if (drag.current == null) return
+  const clientToEq = e => {
     const r = svg.current.getBoundingClientRect()
     const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
     const y = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height))
-    const newFreq = Math.round(FMIN * Math.pow(FMAX / FMIN, x))
-    const newGain = Math.max(-GR, Math.min(GR, Math.round((GR - y * 2 * GR) * 2) / 2))
-    upd(drag.current, { f: newFreq, g: newGain })
+    const freq = Math.round(FMIN * Math.pow(FMAX / FMIN, x))
+    const gain = Math.max(-GR, Math.min(GR, Math.round((GR - y * 2 * GR) * 2) / 2))
+    return { x, y, freq, gain, px: x * W, py: y * H }
   }
+
+  const move = e => {
+    const pt = clientToEq(e)
+    if (drag.current != null) {
+      upd(drag.current, { f: pt.freq, g: pt.gain })
+      setHoverProbe({ freq: pt.freq, gain: pt.gain, x: pt.px, y: pt.py })
+    } else {
+      setHoverProbe({ freq: pt.freq, gain: pt.gain, x: pt.px, y: pt.py })
+    }
+  }
+
   const key = (e, i) => {
     const b = bands[i], k = e.key
     if (k === 'ArrowUp') upd(i, { g: Math.min(GR, b.g + 0.5) })
@@ -577,47 +700,69 @@ function EqPanel({ bands, setBands, eqOn, setEqOn, scope, setScope, sel, setSel,
     </div>
 
     <div className="eq-stage">
-      <svg ref={svg} viewBox={`0 0 ${W} ${H}`} className={`eqg${eqOn ? '' : ' off'}`} onPointerMove={move}
-        onPointerUp={() => { drag.current = null }} onPointerCancel={() => { drag.current = null }}>
+      <svg
+        ref={svg}
+        viewBox={`0 0 ${W} ${H}`}
+        className={`eqg${eqOn ? '' : ' off'}`}
+        onPointerMove={move}
+        onPointerLeave={() => { if (drag.current == null) setHoverProbe(null) }}
+        onPointerUp={() => { drag.current = null }}
+        onPointerCancel={() => { drag.current = null }}
+      >
         <defs>
           <linearGradient id="eqSpecGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--acc)" stopOpacity="0.28" />
-            <stop offset="65%" stopColor="var(--acc)" stopOpacity="0.07" />
+            <stop offset="0%" stopColor="var(--acc)" stopOpacity="0.34" />
+            <stop offset="55%" stopColor="var(--acc)" stopOpacity="0.09" />
             <stop offset="100%" stopColor="var(--acc)" stopOpacity="0.01" />
           </linearGradient>
           <linearGradient id="eqCurveGrad" x1="0%" y1="0%" x2="100%" y2="0%">
             <stop offset="0%" stopColor="#60a5fa" />
-            <stop offset="35%" stopColor="var(--acc)" />
-            <stop offset="70%" stopColor="#34d399" />
-            <stop offset="100%" stopColor="#fbbf24" />
+            <stop offset="28%" stopColor="var(--acc)" />
+            <stop offset="62%" stopColor="#34d399" />
+            <stop offset="85%" stopColor="#fbbf24" />
+            <stop offset="100%" stopColor="#fb7185" />
           </linearGradient>
           <linearGradient id="eqFillGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--acc)" stopOpacity="0.32" />
-            <stop offset="50%" stopColor="var(--acc)" stopOpacity="0.1" />
+            <stop offset="0%" stopColor="var(--acc)" stopOpacity="0.36" />
+            <stop offset="50%" stopColor="var(--acc)" stopOpacity="0.11" />
             <stop offset="100%" stopColor="var(--acc)" stopOpacity="0.01" />
           </linearGradient>
+          <filter id="eqGlow" x="-15%" y="-25%" width="130%" height="150%">
+            <feGaussianBlur stdDeviation="3.2" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
         </defs>
 
         {showSpec && specArea && (
           <>
             <path d={specArea} fill="url(#eqSpecGrad)" />
-            <path d={specTopLine} fill="none" stroke="color-mix(in srgb,var(--acc) 45%,transparent)" strokeWidth="1.2" strokeDasharray="3 3" />
+            <path d={specTopLine} fill="none" stroke="color-mix(in srgb,var(--acc) 55%,transparent)" strokeWidth="1.5" strokeLinecap="round" />
           </>
         )}
 
         {[50, 100, 200, 500, 1000, 2000, 5000, 10000].map(f => (
           <g key={f}>
-            <line x1={X(f)} x2={X(f)} y1="14" y2={H - 18} className="gl" />
-            <text x={X(f)} y={H - 4} textAnchor="middle" className="gt">{f >= 1000 ? f / 1000 + 'k' : f}</text>
+            <line x1={X(f)} x2={X(f)} y1="14" y2={H - 20} className="gl" />
+            <text x={X(f)} y={H - 5} textAnchor="middle" className="gt">{f >= 1000 ? f / 1000 + 'k' : f}</text>
           </g>
         ))}
 
         {[-12, -6, 0, 6, 12].map(g => (
           <g key={g}>
-            <line x1="28" x2={W - 8} y1={Y(g)} y2={Y(g)} className={g === 0 ? 'gl z' : 'gl'} />
-            <text x="6" y={Y(g) + 3.5} className="gt">{g > 0 ? '+' + g : g}</text>
+            <line x1="32" x2={W - 10} y1={Y(g)} y2={Y(g)} className={g === 0 ? 'gl z' : 'gl'} />
+            <text x="8" y={Y(g) + 3.5} className="gt">{g > 0 ? '+' + g : g}</text>
           </g>
         ))}
+
+        {hoverProbe && drag.current == null && (
+          <g className="probe" pointerEvents="none">
+            <line x1={hoverProbe.x} x2={hoverProbe.x} y1="14" y2={H - 20} stroke="color-mix(in srgb,var(--text) 24%,transparent)" strokeDasharray="3 3" />
+            <circle cx={hoverProbe.x} cy={hoverProbe.y} r="3.5" fill="var(--acc)" opacity="0.7" />
+          </g>
+        )}
 
         {showIndiv && bands.map((b, i) => {
           const isFocus = sel === i || hoverIdx === i
@@ -627,22 +772,26 @@ function EqPanel({ bands, setBands, eqOn, setEqOn, scope, setScope, sel, setSel,
               d={indivLines[i]}
               fill="none"
               stroke={BAND_COLORS[i % BAND_COLORS.length]}
-              strokeWidth={isFocus ? 2 : 1.15}
-              strokeOpacity={isFocus ? 0.85 : 0.34}
-              strokeDasharray={EQ_DEFAULT[i].type === 'peaking' ? 'none' : '4 3'}
+              strokeWidth={isFocus ? 2.2 : 1.25}
+              strokeOpacity={isFocus ? 0.9 : 0.36}
+              strokeLinecap="round"
+              strokeDasharray={EQ_DEFAULT[i].type === 'peaking' ? 'none' : '5 4'}
             />
           )
         })}
 
-        <path d={`${line} L${W - 8},${Y(0)} L28,${Y(0)} Z`} fill="url(#eqFillGrad)" className="ar" />
-        <path d={line} stroke="url(#eqCurveGrad)" className="cv" />
+        <path d={`${line} L${W - 10},${Y(0)} L32,${Y(0)} Z`} fill="url(#eqFillGrad)" className="ar" />
+        <path d={line} stroke="url(#eqCurveGrad)" className="cv" filter="url(#eqGlow)" />
 
         {bands.map((b, i) => {
           const cx = X(b.f), cy = Y(b.g), isSel = sel === i, col = BAND_COLORS[i % BAND_COLORS.length]
           return (
             <g key={i}>
               {isSel && (
-                <line x1={cx} x2={cx} y1={Y(0)} y2={cy} stroke={col} strokeWidth="1.5" strokeDasharray="3 3" opacity="0.7" />
+                <line x1={cx} x2={cx} y1={Y(0)} y2={cy} stroke={col} strokeWidth="1.6" strokeDasharray="3 3" opacity="0.78" />
+              )}
+              {isSel && (
+                <circle cx={cx} cy={cy} r="20" fill="none" stroke={col} strokeWidth="1.5" opacity="0.35" className="pulse-ring" />
               )}
               <circle
                 cx={cx}
@@ -690,11 +839,14 @@ function EqPanel({ bands, setBands, eqOn, setEqOn, scope, setScope, sel, setSel,
           <span>{fmtHz(activeBand.f)}</span>
           <span className="hud-gain">{activeBand.g > 0 ? `+${activeBand.g}` : activeBand.g} dB</span>
           <span>Q {activeBand.q.toFixed(1)}</span>
+          {hoverProbe && (
+            <span className="hud-cursor">· {fmtHz(hoverProbe.freq)} / {hoverProbe.gain > 0 ? `+${hoverProbe.gain}` : hoverProbe.gain} dB</span>
+          )}
         </div>
       )}
     </div>
 
-    <small className="hint">Seret titik bernomor 1–6 untuk mengubah frekuensi (kiri-kanan) dan gain (atas-bawah). Garis putus-putus halus menunjukkan kurva tiap band, sedangkan area belakang menampilkan spektrum RTA real-time. Klik dua kali titik untuk reset ke 0 dB.</small>
+    <small className="hint">Kurva dihaluskan dengan interpolasi kubik spline dan cahaya halus. Seret titik 1–6 untuk mengatur frekuensi &amp; gain, atau arahkan kursor untuk membaca titik frekuensi/gain secara presisi.</small>
 
     <div className="bands">
       {bands.map((b, i) => {
@@ -727,14 +879,33 @@ function EqPanel({ bands, setBands, eqOn, setEqOn, scope, setScope, sel, setSel,
 }
 
 function TunerPanel({ flash }) {
+  const [instrument, setInstrument] = useState('guitar')
+  const [a4Ref, setA4Ref] = useState(440)
+  const [targetMode, setTargetMode] = useState('auto')
+  const [selectedTarget, setSelectedTarget] = useState(null)
   const [listening, setListening] = useState(false)
   const [pitch, setPitch] = useState(null)
   const [refFreq, setRefFreq] = useState(null)
+
+  const instCfg = TUNING_INSTRUMENTS[instrument] || TUNING_INSTRUMENTS.guitar
+  const instRef = useRef(instCfg)
+  const a4RefVal = useRef(a4Ref)
+  const historyRef = useRef([])
+  instRef.current = instCfg
+  a4RefVal.current = a4Ref
+
   const ctxRef = useRef(null)
   const analyserRef = useRef(null)
   const streamRef = useRef(null)
   const rafRef = useRef(null)
   const toneOscRef = useRef(null)
+
+  useEffect(() => {
+    const first = instCfg.notes[0]
+    setSelectedTarget(first ? { ...first, freq: +(first.freq * (a4Ref / 440)).toFixed(2) } : null)
+    historyRef.current = []
+    setPitch(null)
+  }, [instrument, a4Ref]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const stopMic = () => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current)
@@ -748,6 +919,7 @@ function TunerPanel({ flash }) {
       ctxRef.current = null
     }
     analyserRef.current = null
+    historyRef.current = []
     setListening(false)
     setPitch(null)
   }
@@ -761,12 +933,13 @@ function TunerPanel({ flash }) {
       const ctx = new AudioCtx()
       const src = ctx.createMediaStreamSource(stream)
       const analyser = ctx.createAnalyser()
-      analyser.fftSize = 4096
+      analyser.fftSize = 8192
       src.connect(analyser)
 
       ctxRef.current = ctx
       analyserRef.current = analyser
       streamRef.current = stream
+      historyRef.current = []
       setListening(true)
 
       const buf = new Float32Array(analyser.fftSize)
@@ -774,9 +947,33 @@ function TunerPanel({ flash }) {
       const loop = now => {
         if (!analyserRef.current || !ctxRef.current) return
         analyserRef.current.getFloatTimeDomainData(buf)
-        if (now - lastUi > 65) {
+        if (now - lastUi > 55) {
           lastUi = now
-          setPitch(detectPitchAutocorr(buf, ctxRef.current.sampleRate))
+          const cfg = instRef.current
+          const det = detectPitchAccurate(buf, ctxRef.current.sampleRate, a4RefVal.current, cfg.minHz, cfg.maxHz)
+          if (det) {
+            const hist = historyRef.current
+            hist.push(det.freq)
+            if (hist.length > 5) hist.shift()
+            // Median filter agar lonjakan octave/noise tidak membuat jarum meloncat
+            const sorted = [...hist].sort((a, b) => a - b)
+            const medFreq = sorted[Math.floor(sorted.length / 2)]
+            const midiFloat = 69 + 12 * Math.log2(medFreq / a4RefVal.current)
+            const midiNearest = Math.round(midiFloat)
+            const cents = Math.round((midiFloat - midiNearest) * 100)
+            const noteIdx = ((midiNearest % 12) + 12) % 12
+            const octave = Math.floor(midiNearest / 12) - 1
+            setPitch({
+              freq: medFreq,
+              note: NOTE_NAMES_SHARP[noteIdx],
+              octave,
+              cents: Math.max(-50, Math.min(50, cents)),
+              clarity: det.clarity,
+            })
+          } else {
+            if (historyRef.current.length > 0) historyRef.current.shift()
+            if (historyRef.current.length === 0) setPitch(null)
+          }
         }
         rafRef.current = requestAnimationFrame(loop)
       }
@@ -823,28 +1020,72 @@ function TunerPanel({ flash }) {
     if (ctxRef.current) ctxRef.current.close().catch(() => {})
   }, [])
 
-  const cents = pitch ? pitch.cents : 0
-  const inTune = pitch ? Math.abs(cents) <= 5 : false
+  // Jika mode "Kunci Senar/Nada" aktif dan nada target dipilih, hitung selisih cents terhadap nada target
+  let displayNote = pitch ? `${pitch.note}${pitch.octave}` : '—'
+  let cents = pitch ? pitch.cents : 0
+  if (pitch && targetMode === 'manual' && selectedTarget) {
+    const targetHz = selectedTarget.freq * (a4Ref / 440)
+    const diffCents = Math.round(1200 * Math.log2(pitch.freq / targetHz))
+    if (Math.abs(diffCents) <= 50) {
+      cents = diffCents
+      displayNote = `${selectedTarget.note}${selectedTarget.octave}`
+    }
+  }
+
+  const inTune = pitch ? Math.abs(cents) <= 4 : false
   const needlePct = 50 + (cents / 50) * 44
 
   return (
     <div className="tuner-box">
+      <div className="tuner-controls">
+        <div className="row">
+          <small>Instrumen</small>
+          <Seg
+            value={instrument}
+            onChange={setInstrument}
+            options={Object.entries(TUNING_INSTRUMENTS).map(([k, v]) => [k, v.name])}
+          />
+        </div>
+        <div className="row">
+          <small>Kalibrasi A4</small>
+          <Seg
+            value={a4Ref}
+            onChange={setA4Ref}
+            options={[[432, '432 Hz'], [440, '440 Hz'], [442, '442 Hz']]}
+          />
+          <Seg
+            value={targetMode}
+            onChange={setTargetMode}
+            options={[['auto', 'Deteksi Otomatis'], ['manual', 'Kunci Nada Target']]}
+          />
+        </div>
+      </div>
+
       <div className="row">
         <button className={listening ? 'on' : 'primary'} onClick={listening ? stopMic : startMic}>
           <Mic size={14} /> {listening ? 'Matikan Tuner Mic' : 'Aktifkan Tuner Mic'}
         </button>
         <span className={`tuner-status${inTune ? ' ok' : ''}`}>
-          {!listening ? 'Siap (Mic Off)' : !pitch ? 'Petik senar / mainkan nada…' : inTune ? 'PAS (In Tune)' : cents < 0 ? 'TERLALU RENDAH (Flat)' : 'TERLALU TINGGI (Sharp)'}
+          {!listening
+            ? 'Siap (Mic Off)'
+            : !pitch
+              ? `Mainkan ${instCfg.name}…`
+              : inTune
+                ? 'PAS (±4¢)'
+                : cents < 0
+                  ? 'TERLALU RENDAH (Flat)'
+                  : 'TERLALU TINGGI (Sharp)'}
         </span>
       </div>
 
       <div className="tuner-readout">
         <div className={`tuner-note${inTune ? ' ok' : ''}`}>
-          {pitch ? `${pitch.note}${pitch.octave}` : '—'}
+          {displayNote}
         </div>
         <div className="tuner-meta">
           <span>{pitch ? `${pitch.freq.toFixed(1)} Hz` : '0.0 Hz'}</span>
           <span className="tuner-cents">{pitch ? `${cents > 0 ? `+${cents}` : cents} ¢` : '0 ¢'}</span>
+          {pitch && <small>Akurasi sinyal: {Math.round(pitch.clarity * 100)}%</small>}
         </div>
       </div>
 
@@ -860,19 +1101,261 @@ function TunerPanel({ flash }) {
       </div>
 
       <div className="tuner-ref">
-        <small>Nada acuan standar gitar (klik untuk bunyikan)</small>
+        <small>
+          Nada acuan {instCfg.name} (klik untuk bunyikan nada; {targetMode === 'manual' ? 'juga mengunci target nada' : 'klik untuk dengar referensi'})
+        </small>
         <div className="chips">
-          {GUITAR_STRINGS.map(st => (
+          {instCfg.notes.map(st => {
+            const tunedHz = +(st.freq * (a4Ref / 440)).toFixed(2)
+            const isTarget = targetMode === 'manual' && selectedTarget?.label === st.label
+            const isPlayingTone = refFreq === tunedHz
+            return (
+              <button
+                key={st.label}
+                className={isPlayingTone || isTarget ? 'on' : ''}
+                onClick={() => {
+                  setSelectedTarget({ ...st, freq: tunedHz })
+                  toggleTone(tunedHz)
+                }}
+              >
+                {st.label}<small>{tunedHz} Hz</small>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ---------- Kamus Chord & Scale per Instrumen ---------- */
+const SCALE_SPECS = {
+  major: { name: 'Mayor (Ionian)', intervals: [0, 2, 4, 5, 7, 9, 11], degrees: ['1', '2', '3', '4', '5', '6', '7'] },
+  minor: { name: 'Natural Minor (Aeolian)', intervals: [0, 2, 3, 5, 7, 8, 10], degrees: ['1', '2', 'b3', '4', '5', 'b6', 'b7'] },
+  pent_maj: { name: 'Pentatonik Mayor', intervals: [0, 2, 4, 7, 9], degrees: ['1', '2', '3', '5', '6'] },
+  pent_min: { name: 'Pentatonik Minor', intervals: [0, 3, 5, 7, 10], degrees: ['1', 'b3', '4', '5', 'b7'] },
+  blues: { name: 'Blues Minor', intervals: [0, 3, 5, 6, 7, 10], degrees: ['1', 'b3', '4', 'b5', '5', 'b7'] },
+  dorian: { name: 'Dorian', intervals: [0, 2, 3, 5, 7, 9, 10], degrees: ['1', '2', 'b3', '4', '5', '6', 'b7'] },
+}
+
+const CHORD_DICT_TYPES = {
+  maj: { name: 'Mayor', symbol: '', intervals: [0, 4, 7], roles: ['Root', '3rd', '5th'] },
+  min: { name: 'Minor', symbol: 'm', intervals: [0, 3, 7], roles: ['Root', 'b3rd', '5th'] },
+  '7': { name: 'Dominan 7', symbol: '7', intervals: [0, 4, 7, 10], roles: ['Root', '3rd', '5th', 'b7th'] },
+  maj7: { name: 'Major 7', symbol: 'maj7', intervals: [0, 4, 7, 11], roles: ['Root', '3rd', '5th', '7th'] },
+  m7: { name: 'Minor 7', symbol: 'm7', intervals: [0, 3, 7, 10], roles: ['Root', 'b3rd', '5th', 'b7th'] },
+  sus4: { name: 'Sus4', symbol: 'sus4', intervals: [0, 5, 7], roles: ['Root', '4th', '5th'] },
+  sus2: { name: 'Sus2', symbol: 'sus2', intervals: [0, 2, 7], roles: ['Root', '2nd', '5th'] },
+  dim: { name: 'Diminished', symbol: 'dim', intervals: [0, 3, 6], roles: ['Root', 'b3rd', 'b5th'] },
+}
+
+const FRET_INSTRUMENTS = {
+  guitar: {
+    name: 'Gitar (E A D G B E)',
+    frets: 12,
+    // Dari senar bawah (tinggi, indeks 0) ke senar atas (rendah, indeks 5) agar tampil alami seperti diagram
+    strings: [
+      { label: 'e (1)', openMidi: 64 },
+      { label: 'B (2)', openMidi: 59 },
+      { label: 'G (3)', openMidi: 55 },
+      { label: 'D (4)', openMidi: 50 },
+      { label: 'A (5)', openMidi: 45 },
+      { label: 'E (6)', openMidi: 40 },
+    ],
+  },
+  bass: {
+    name: 'Bass (G D A E)',
+    frets: 12,
+    strings: [
+      { label: 'G (1)', openMidi: 43 },
+      { label: 'D (2)', openMidi: 38 },
+      { label: 'A (3)', openMidi: 33 },
+      { label: 'E (4)', openMidi: 28 },
+    ],
+  },
+  ukulele: {
+    name: 'Ukulele (A E C G)',
+    frets: 12,
+    strings: [
+      { label: 'A (1)', openMidi: 69 },
+      { label: 'E (2)', openMidi: 64 },
+      { label: 'C (3)', openMidi: 60 },
+      { label: 'G (4)', openMidi: 67 },
+    ],
+  },
+}
+
+function getScaleNotes(rootIdx, scaleKey) {
+  const sp = SCALE_SPECS[scaleKey] || SCALE_SPECS.major
+  return sp.intervals.map((iv, i) => {
+    const pc = mod12(rootIdx + iv)
+    return { note: NOTES[pc], pc, degree: sp.degrees[i] || '' }
+  })
+}
+
+function getChordNotes(rootIdx, chordKey) {
+  const sp = CHORD_DICT_TYPES[chordKey] || CHORD_DICT_TYPES.maj
+  return sp.intervals.map((iv, i) => {
+    const pc = mod12(rootIdx + iv)
+    return { note: NOTES[pc], pc, role: sp.roles[i] || '' }
+  })
+}
+
+function InstrumentChordScaleDict({ detectedKey, transpose = 0 }) {
+  const defaultRoot = detectedKey ? mod12(detectedKey.root + transpose) : 0
+  const defaultScale = detectedKey?.mode === 'min' ? 'minor' : 'major'
+
+  const [instKey, setInstKey] = useState('guitar')
+  const [dictTab, setDictTab] = useState('scale')
+  const [rootNote, setRootNote] = useState(defaultRoot)
+  const [scaleType, setScaleType] = useState(defaultScale)
+  const [chordType, setChordType] = useState('maj')
+  const [fretWindow, setFretWindow] = useState('0-5')
+
+  useEffect(() => {
+    if (detectedKey) {
+      setRootNote(mod12(detectedKey.root + transpose))
+      setScaleType(detectedKey.mode === 'min' ? 'minor' : 'major')
+    }
+  }, [detectedKey?.root, detectedKey?.mode, transpose]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const inst = FRET_INSTRUMENTS[instKey] || FRET_INSTRUMENTS.guitar
+  const activeNotes = useMemo(
+    () => (dictTab === 'scale' ? getScaleNotes(rootNote, scaleType) : getChordNotes(rootNote, chordType)),
+    [dictTab, rootNote, scaleType, chordType]
+  )
+  const activePcSet = useMemo(() => new Set(activeNotes.map(n => n.pc)), [activeNotes])
+  const noteMetaByPc = useMemo(() => {
+    const map = {}
+    activeNotes.forEach(n => { map[n.pc] = n })
+    return map
+  }, [activeNotes])
+
+  const [startFret, endFret] = fretWindow === '5-10' ? [5, 10] : fretWindow === '7-12' ? [7, 12] : [0, 5]
+  const fretCols = useMemo(() => {
+    const arr = []
+    for (let f = startFret; f <= endFret; f++) arr.push(f)
+    return arr
+  }, [startFret, endFret])
+
+  const chordTitle = `${NOTES[rootNote]}${CHORD_DICT_TYPES[chordType]?.symbol || ''}`
+  const scaleTitle = `${NOTES[rootNote]} ${SCALE_SPECS[scaleType]?.name || ''}`
+
+  return (
+    <div className="dict-box">
+      <div className="dict-top">
+        <div className="row">
+          <small>Instrumen</small>
+          <Seg
+            value={instKey}
+            onChange={setInstKey}
+            options={Object.entries(FRET_INSTRUMENTS).map(([k, v]) => [k, v.name])}
+          />
+        </div>
+        <div className="row">
+          <small>Mode Kamus</small>
+          <Seg
+            value={dictTab}
+            onChange={setDictTab}
+            options={[['scale', 'Scale / Tangga Nada'], ['chord', 'Chord / Akor']]}
+          />
+        </div>
+      </div>
+
+      <div className="row">
+        <small>Nada Dasar</small>
+        <div className="chips">
+          {NOTES.map((n, idx) => (
             <button
-              key={st.label}
-              className={refFreq === st.freq ? 'on' : ''}
-              onClick={() => toggleTone(st.freq)}
+              key={n}
+              className={rootNote === idx ? 'on' : ''}
+              onClick={() => setRootNote(idx)}
             >
-              {st.label}<small>{st.freq} Hz</small>
+              {n}
             </button>
           ))}
         </div>
       </div>
+
+      {dictTab === 'scale' ? (
+        <div className="row">
+          <small>Jenis Scale</small>
+          <Seg
+            value={scaleType}
+            onChange={setScaleType}
+            options={Object.entries(SCALE_SPECS).map(([k, v]) => [k, v.name])}
+          />
+        </div>
+      ) : (
+        <div className="row">
+          <small>Jenis Chord</small>
+          <Seg
+            value={chordType}
+            onChange={setChordType}
+            options={Object.entries(CHORD_DICT_TYPES).map(([k, v]) => [k, v.name])}
+          />
+        </div>
+      )}
+
+      <div className="dict-summary">
+        <div>
+          <b>{dictTab === 'scale' ? scaleTitle : `Chord ${chordTitle}`}</b>
+          <div className="dict-pills">
+            {activeNotes.map((item, idx) => (
+              <span key={`${item.note}-${idx}`} className={`dpill${item.pc === rootNote ? ' root' : ''}`}>
+                <strong>{item.note}</strong>
+                <small>{dictTab === 'scale' ? item.degree : item.role}</small>
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className="row">
+          <small>Posisi Fret</small>
+          <Seg
+            value={fretWindow}
+            onChange={setFretWindow}
+            options={[['0-5', 'Fret 0–5'], ['5-10', 'Fret 5–10'], ['7-12', 'Fret 7–12']]}
+          />
+        </div>
+      </div>
+
+      <div className="fretboard-wrap">
+        <div className="fret-grid" style={{ '--fret-cols': fretCols.length }}>
+          <div className="fret-corner">Senar</div>
+          {fretCols.map(f => (
+            <div key={f} className="fret-num">{f === 0 ? 'Open' : f}</div>
+          ))}
+
+          {inst.strings.map(st => (
+            <div key={st.label} className="fret-row-group">
+              <div className="fret-str-lbl">{st.label}</div>
+              {fretCols.map(f => {
+                const midi = st.openMidi + f
+                const pc = mod12(midi)
+                const active = activePcSet.has(pc)
+                const isRoot = pc === rootNote
+                const meta = noteMetaByPc[pc]
+                return (
+                  <div
+                    key={`${st.label}-${f}`}
+                    className={`fret-cell${f === 0 ? ' open-col' : ''}${active ? ' hit' : ''}${isRoot ? ' root' : ''}`}
+                  >
+                    {active ? (
+                      <span className="fret-dot" title={`${NOTES[pc]} · ${meta?.degree || meta?.role || ''}`}>
+                        <b>{NOTES[pc]}</b>
+                        <small>{meta?.degree || meta?.role || ''}</small>
+                      </span>
+                    ) : (
+                      <span className="fret-empty">·</span>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+      <small className="hint">Posisi nada pada diagram fret otomatis mengikuti kunci/transpose lagu bila track sudah terdeteksi, atau bisa dipilih manual kapan saja.</small>
     </div>
   )
 }
@@ -900,17 +1383,7 @@ export default function App() {
   const [chordMode, setChordMode] = useState('extended')
   const [stemMode, setStemMode] = useState('full')
 
-  // Default OFF agar tidak pernah menarik scroll halaman/sheet secara tak terduga
-  const [autoScroll, setAutoScroll] = useState(false)
-  const [sheetView, setSheetView] = useState('grid')
-  const [notationMode, setNotationMode] = useState('both')
-  const [showVoicing, setShowVoicing] = useState(true)
-  const [earQuiz, setEarQuiz] = useState(false)
-  const [quizReveal, setQuizReveal] = useState(false)
-  const [customChords, setCustomChords] = useState({ A: {}, B: {} })
-  const [editingIdx, setEditingIdx] = useState(null)
-  const [editVal, setEditVal] = useState('')
-  const sheetBoxRef = useRef(null)
+
 
   const [keepPitch, setKeepPitch] = useState(true)
   const [pitchOk, setPitchOk] = useState(false)
@@ -925,7 +1398,21 @@ export default function App() {
   const [spot, setSpot] = useState(false)
   const [noise, setNoise] = useState({ mode: 'off', level: 0.4 })
   const [punk, setPunk] = useState(false)
-  const [meters, setMeters] = useState({ bands: [-90, -90, -90, -90, -90], peak: -120, corr: 0 })
+  const [meters, setMeters] = useState({
+    bands: [-90, -90, -90, -90, -90],
+    bandPeaks: [-90, -90, -90, -90, -90],
+    peak: -120,
+    maxPeak: -120,
+    rmsL: -100,
+    rmsR: -100,
+    corr: 0,
+    clipped: false,
+  })
+  const [holdPeaks, setHoldPeaks] = useState(true)
+  const [showTargetValues, setShowTargetValues] = useState(true)
+  const peakHoldRef = useRef([-90, -90, -90, -90, -90])
+  const maxPeakRef = useRef(-120)
+  const clipCountRef = useRef(0)
   const [notes, setNotes] = useState([])
   const [noteText, setNoteText] = useState('')
   const [promoLen, setPromoLen] = useState(30)
@@ -1001,7 +1488,7 @@ export default function App() {
   const switchTrack = x => {
     if (!files[x] || x === active) return
     const p = Math.min(getPos(), files[x].buf.duration - 0.1)
-    setActive(x); S.current.active = x; setP(p); setEditingIdx(null)
+    setActive(x); S.current.active = x; setP(p)
     if (S.current.playing) restart(p, { active: x })
   }
   const changeLoop = next => {
@@ -1022,8 +1509,6 @@ export default function App() {
       const buf = await e.ctx.decodeAudioData(ab)
       const lufs = estimateLufs(buf)
       const info = { name, buf, peaks: waveformPeaks(buf), bpm: detectBpm(buf), lufs, norm: Math.min(1, 10 ** ((-14 - lufs) / 20)) }
-      setCustomChords(c => ({ ...c, [slot]: {} }))
-      setEditingIdx(null)
       setFiles(f => ({ ...f, [slot]: info }))
       setTimeout(() => {
         const harm = analyzeHarmony(buf, chordMode)
@@ -1181,10 +1666,28 @@ export default function App() {
         setSpecCurve(pts)
 
         const t = new Float32Array(e.an.fftSize); e.an.getFloatTimeDomainData(t)
-        let pk = 0; for (const x of t) pk = Math.max(pk, Math.abs(x))
+        let pk = 0; for (const x of t) { const ax = Math.abs(x); if (ax > pk) pk = ax; if (ax >= 0.999) clipCountRef.current += 1 }
         const l = new Float32Array(2048), r = new Float32Array(2048); e.anL.getFloatTimeDomainData(l); e.anR.getFloatTimeDomainData(r)
         let lr = 0, ll = 0, rr = 0; for (let i = 0; i < 2048; i++) { lr += l[i] * r[i]; ll += l[i] * l[i]; rr += r[i] * r[i] }
-        setMeters({ bands: [...smooth.current], peak: db(pk), corr: ll && rr ? lr / Math.sqrt(ll * rr) : 0 })
+        const peakDb = db(pk)
+        if (peakDb > maxPeakRef.current) maxPeakRef.current = peakDb
+        peakHoldRef.current = peakHoldRef.current.map((prevHold, idx) => {
+          const curVal = smooth.current[idx]
+          if (curVal >= prevHold) return curVal
+          return Math.max(curVal, prevHold - 0.35)
+        })
+        const rmsLDb = db(Math.sqrt(ll / 2048))
+        const rmsRDb = db(Math.sqrt(rr / 2048))
+        setMeters({
+          bands: [...smooth.current],
+          bandPeaks: [...peakHoldRef.current],
+          peak: peakDb,
+          maxPeak: maxPeakRef.current,
+          rmsL: rmsLDb,
+          rmsR: rmsRDb,
+          corr: ll && rr ? lr / Math.sqrt(ll * rr) : 0,
+          clipped: clipCountRef.current > 0 || peakDb >= -0.05,
+        })
       }
       id = requestAnimationFrame(tick)
     }
@@ -1269,61 +1772,7 @@ export default function App() {
   }
 
   const harm = cur?.harm
-  const rawChords = harm?.chords || []
-  const chords = useMemo(() => {
-    const ov = customChords[active] || {}
-    return rawChords.map((c, idx) => ({
-      ...c,
-      name: ov[idx] || c.name,
-      edited: Boolean(ov[idx]),
-    }))
-  }, [rawChords, customChords, active])
-
   const trA = tr[active]
-  let ci = -1; chords.forEach((c, i) => { if (c.t <= pos) ci = i })
-  const c0 = Math.max(0, ci - 2)
-
-  useEffect(() => { setQuizReveal(false) }, [ci, active])
-
-  // Auto-scroll opsional: hanya berjalan saat autoScroll aktif & sedang diputar, menggeser .chord-sheet saja
-  useEffect(() => {
-    if (!autoScroll || !playing || ci < 0) return
-    const container = sheetBoxRef.current
-    if (!container) return
-    const activeCell = container.querySelectorAll('.sheet-cell')[ci]
-    if (!activeCell) return
-    if (sheetView === 'timeline') {
-      const targetLeft = activeCell.offsetLeft - container.clientWidth / 2 + activeCell.clientWidth / 2
-      container.scrollTo({ left: Math.max(0, targetLeft), behavior: 'auto' })
-    } else {
-      const targetTop = activeCell.offsetTop - container.clientHeight / 2 + activeCell.clientHeight / 2
-      container.scrollTo({ top: Math.max(0, targetTop), behavior: 'auto' })
-    }
-  }, [ci, sheetView, playing, autoScroll])
-
-  const saveEditChord = idx => {
-    const clean = editVal.trim()
-    setCustomChords(prev => {
-      const slotMap = { ...(prev[active] || {}) }
-      if (clean) slotMap[idx] = clean
-      else delete slotMap[idx]
-      return { ...prev, [active]: slotMap }
-    })
-    setEditingIdx(null)
-    flash(clean ? `Chord #${idx + 1} diperbarui ke ${clean}` : `Chord #${idx + 1} dikembalikan ke deteksi otomatis`)
-  }
-
-  const renderChordLabel = chord => {
-    const transposed = tChord(chord.name, trA)
-    const roman = chordToRoman(chord.name, harm?.key, trA)
-    if (notationMode === 'roman') return roman
-    if (notationMode === 'both') return `${transposed} (${roman})`
-    return transposed
-  }
-
-  const curChordObj = ci >= 0 ? chords[ci] : null
-  const nextChordObj = ci >= 0 && chords[ci + 1] ? chords[ci + 1] : null
-  const voicing = curChordObj ? getVoicingHint(curChordObj.name, trA) : null
 
   const T = THEMES[theme]
   const mean = meters.bands.reduce((a, b) => a + b, 0) / 5
@@ -1393,10 +1842,10 @@ export default function App() {
           <small className="hint">Pisahkan elemen instrumen secara real-time (Vokal/Lead, Bass/Sub, Drums/Beat, Gitar/Side, atau Minus Vocal) menggunakan pemrosesan Mid-Side dan filter frekuensi tanpa mengubah file asli.</small>
         </Card>
 
-        <Card title="Kunci, Chord, Pendamping Latihan & Chord Sheet" wide>
+        <Card title="Kunci, Transpose & Kamus Chord / Scale" wide>
           <div className="row">
-            <small>Jenis deteksi akor</small>
-            <Seg value={chordMode} onChange={setChordMode} options={[['basic', 'Dasar (Mayor/Minor/7)'], ['extended', 'Extended (add9 / sus / 9 / dim7)']]} />
+            <small>Jenis deteksi harmoni</small>
+            <Seg value={chordMode} onChange={setChordMode} options={[['basic', 'Dasar'], ['extended', 'Extended']]} />
           </div>
           <div className="keys">
             {['A', 'B'].map(x => {
@@ -1420,131 +1869,133 @@ export default function App() {
             <small>Berlaku untuk Track {active}. {pitchOk ? '' : 'Pitch shifter belum siap.'}</small>
           </div>
 
-          {chords.length > 0 ? (<>
-            <div className="sheet-opts">
-              <div className="row">
-                <small>Tampilan Sheet</small>
-                <Seg value={sheetView} onChange={setSheetView} options={[['grid', 'Grid Akor'], ['timeline', 'Progresi Berjalan'], ['compact', 'Ringkas']]} />
-              </div>
-              <div className="row">
-                <small>Notasi</small>
-                <Seg value={notationMode} onChange={setNotationMode} options={[['chord', 'Nama Chord'], ['roman', 'Angka Romawi / Nashville'], ['both', 'Chord + Romawi']]} />
-              </div>
-              <div className="row">
-                <button className={autoScroll ? 'on' : ''} onClick={() => setAutoScroll(s => !s)}>
-                  Auto-Scroll: {autoScroll ? 'ON' : 'OFF'}
-                </button>
-                <button className={showVoicing ? 'on' : ''} onClick={() => setShowVoicing(v => !v)}>
-                  <Music size={14} /> Voicing &amp; Capo
-                </button>
-                <button className={earQuiz ? 'on' : ''} onClick={() => { setEarQuiz(q => !q); setQuizReveal(false) }}>
-                  {earQuiz ? <EyeOff size={14} /> : <Eye size={14} />} Latihan Tebak Chord
-                </button>
-              </div>
-            </div>
+          <InstrumentChordScaleDict detectedKey={harm?.key} transpose={trA} />
+        </Card>
 
-            <div className="now-box">
-              <div className="now">
-                <span>
-                  {curChordObj
-                    ? (earQuiz && !quizReveal ? '? (Tebak Chord)' : renderChordLabel(curChordObj))
-                    : '—'}
-                </span>
-                {earQuiz && curChordObj && (
-                  <button className="primary" onClick={() => setQuizReveal(r => !r)}>
-                    {quizReveal ? 'Sembunyikan Jawaban' : 'Buka Jawaban'}
-                  </button>
-                )}
-                <small>
-                  berikutnya: {nextChordObj
-                    ? (earQuiz && !quizReveal ? '?' : renderChordLabel(nextChordObj))
-                    : '—'}
-                </small>
-              </div>
-
-              {showVoicing && voicing && (!earQuiz || quizReveal) && (
-                <div className="voicing-bar">
-                  <span><b>Alternatif Voicing:</b> {voicing.slash} · {voicing.thirdSlash}</span>
-                  <span><b>Panduan Capo:</b> {voicing.capoHint}</span>
-                </div>
+        <Card title="Spektrum & Meter" wide>
+          <div className="spec-toolbar">
+            <div className="row">
+              <button className={holdPeaks ? 'on' : ''} onClick={() => setHoldPeaks(h => !h)}>
+                Peak Hold: {holdPeaks ? 'ON' : 'OFF'}
+              </button>
+              <button className={punk ? 'on' : ''} onClick={() => setPunk(p => !p)}>
+                Target Punk / Alt-Rock
+              </button>
+              {punk && (
+                <button className={showTargetValues ? 'on' : ''} onClick={() => setShowTargetValues(v => !v)}>
+                  Selisih Target
+                </button>
               )}
             </div>
+            <button
+              onClick={() => {
+                peakHoldRef.current = [-90, -90, -90, -90, -90]
+                maxPeakRef.current = -120
+                clipCountRef.current = 0
+                setMeters(m => ({ ...m, bandPeaks: [-90, -90, -90, -90, -90], maxPeak: -120, clipped: false }))
+                flash('Peak Hold & indikator klip direset')
+              }}
+            >
+              Reset Peak
+            </button>
+          </div>
 
-            <div ref={sheetBoxRef} className={`chord-sheet view-${sheetView}`}>
-              {chords.map((c, idx) => {
-                const isCur = idx === ci
-                const isPast = ci >= 0 && idx < ci
-                const hiddenByQuiz = earQuiz && !quizReveal && idx >= ci
+          <div className="spec-board">
+            <div className="spec-scale" aria-hidden="true">
+              <span>0 dB</span>
+              <span>-25</span>
+              <span>-50</span>
+              <span>-75</span>
+              <span>-100</span>
+            </div>
+
+            <div className="spec">
+              {BANDS.map(([n, lo, hi], i) => {
+                const curVal = meters.bands[i]
+                const barPct = pct(curVal)
+                const holdPct = pct(meters.bandPeaks[i])
+                const targetDb = mean + PUNK_TARGET[i]
+                const targetPct = pct(targetDb)
+                const diffDb = curVal - targetDb
                 return (
-                  <div
-                    key={`${idx}-${c.t}`}
-                    className={`sheet-cell${isCur ? ' cur' : ''}${isPast ? ' past' : ''}${c.edited ? ' edited' : ''}`}
-                  >
-                    {editingIdx === idx ? (
-                      <div className="edit-inline" onClick={e => e.stopPropagation()}>
-                        <input
-                          className="mini-in"
-                          value={editVal}
-                          placeholder={c.name}
-                          onChange={e => setEditVal(e.target.value)}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter') saveEditChord(idx)
-                            if (e.key === 'Escape') setEditingIdx(null)
-                          }}
-                          autoFocus
+                  <div key={n} className="band-col">
+                    <div className="band-top-readout">
+                      <b>{curVal > -99 ? `${curVal.toFixed(1)}` : '−∞'}</b>
+                      <small>dB</small>
+                    </div>
+
+                    <div className="bar">
+                      <div className="fill" style={{ clipPath: `inset(${100 - barPct}% 0 0 0)` }} />
+                      {holdPeaks && meters.bandPeaks[i] > -98 && (
+                        <i className="pk-marker" style={{ bottom: `${holdPct}%` }} title={`Peak Band: ${meters.bandPeaks[i].toFixed(1)} dB`} />
+                      )}
+                      {punk && (
+                        <i
+                          className="tgt"
+                          style={{ bottom: `${targetPct}%` }}
+                          title={`Target Punk/Alt-Rock: ${targetDb.toFixed(1)} dB (${PUNK_TARGET[i] > 0 ? `+${PUNK_TARGET[i]}` : PUNK_TARGET[i]} dari rata-rata)`}
                         />
-                        <button aria-label="Simpan chord" onClick={() => saveEditChord(idx)}><Check size={13} /></button>
-                      </div>
-                    ) : (
-                      <>
-                        <button className="cell-main" onClick={() => seek(c.t)} title="Klik untuk lompat ke waktu chord ini">
-                          <span className="cell-idx">#{idx + 1} · {fmt(c.t)}</span>
-                          <strong className="cell-ch">{hiddenByQuiz ? '?' : renderChordLabel(c)}</strong>
-                          {notationMode !== 'both' && !hiddenByQuiz && (
-                            <span className="cell-sub">
-                              {notationMode === 'roman' ? tChord(c.name, trA) : chordToRoman(c.name, harm?.key, trA)}
-                            </span>
-                          )}
-                        </button>
-                        <button
-                          className="cell-edit"
-                          aria-label={`Edit chord ${idx + 1}`}
-                          title="Koreksi akor manual"
-                          onClick={e => { e.stopPropagation(); setEditingIdx(idx); setEditVal(c.name) }}
-                        >
-                          <Edit3 size={12} />
-                        </button>
-                      </>
-                    )}
+                      )}
+                    </div>
+
+                    <div className="band-foot">
+                      <span className="band-name">{n}</span>
+                      <small className="band-range">{lo}–{hi >= 1000 ? `${hi / 1000}k` : hi} Hz</small>
+                      {punk && showTargetValues && curVal > -98 && (
+                        <small className={`band-delta ${Math.abs(diffDb) <= 2.5 ? 'ok' : diffDb > 0 ? 'hi' : 'lo'}`}>
+                          {diffDb > 0 ? `+${diffDb.toFixed(1)}` : diffDb.toFixed(1)} vs tgt
+                        </small>
+                      )}
+                    </div>
                   </div>
                 )
               })}
             </div>
-
-            <div className="chips">{chords.slice(c0, c0 + 12).map((c, k) => {
-              const realIdx = c0 + k
-              const hide = earQuiz && !quizReveal && realIdx >= ci
-              return (
-                <button key={realIdx} className={realIdx === ci ? 'on' : ''} onClick={() => seek(c.t)}>
-                  {hide ? '?' : renderChordLabel(c)}<small>{fmt(c.t)}</small>
-                </button>)
-            })}</div>
-          </>) : <small className="hint">{harm ? 'Chord tidak terdeteksi pada audio ini.' : 'Unggah lagu untuk melihat kunci dan chord.'}</small>}
-          <small className="hint">Klik akor di Chord Sheet untuk langsung seek ke waktunya, atau klik ikon pensil untuk mengoreksi akor secara manual sesuai telingamu.</small>
-        </Card>
-
-        <Card title="Spektrum & Meter" wide>
-          <div className="spec">
-            {BANDS.map(([n], i) => (
-              <div key={n} className="bar"><div className="fill" style={{ clipPath: `inset(${100 - pct(meters.bands[i])}% 0 0 0)` }} />
-                {punk && <i className="tgt" style={{ bottom: `${pct(mean + PUNK_TARGET[i])}%` }} />}<span>{n}</span></div>))}
           </div>
-          <label className="chk"><input type="checkbox" checked={punk} onChange={e => setPunk(e.target.checked)} /> Tampilkan kurva target Punk / Alt-Rock (garis penanda)</label>
-          <div className="row">
-            <div className="meter"><span>Peak</span><b className={meters.peak > -1 ? 'warn' : ''}>{meters.peak > -119 ? meters.peak.toFixed(1) : '−∞'} dB</b></div>
-            <div className="meter grow"><span>Korelasi stereo</span>
-              <div className="corr"><i style={{ left: `${(meters.corr + 1) * 50}%` }} /></div>
-              <b>{meters.corr.toFixed(2)}</b></div>
+
+          <div className="meter-grid">
+            <div className="meter-card">
+              <div className="meter-head">
+                <span>Peak Aktif</span>
+                <b className={meters.peak > -1 ? 'warn' : ''}>{meters.peak > -119 ? `${meters.peak.toFixed(1)} dB` : '−∞ dB'}</b>
+              </div>
+              <small className="meter-sub">
+                Max Hold: <b>{meters.maxPeak > -119 ? `${meters.maxPeak.toFixed(1)} dB` : '−∞'}</b>
+                {meters.clipped && <span className="clip-badge">KLIP TERDETEKSI</span>}
+              </small>
+            </div>
+
+            <div className="meter-card">
+              <div className="meter-head">
+                <span>Level L / R (RMS)</span>
+                <b>{meters.rmsL > -95 ? `${meters.rmsL.toFixed(1)} / ${meters.rmsR.toFixed(1)} dB` : '−∞ / −∞'}</b>
+              </div>
+              <div className="lr-bars" aria-hidden="true">
+                <div className="lr-row">
+                  <span>L</span>
+                  <div className="lr-track"><i style={{ width: `${pct(meters.rmsL)}%` }} /></div>
+                </div>
+                <div className="lr-row">
+                  <span>R</span>
+                  <div className="lr-track"><i style={{ width: `${pct(meters.rmsR)}%` }} /></div>
+                </div>
+              </div>
+            </div>
+
+            <div className="meter-card grow">
+              <div className="meter-head">
+                <span>Korelasi Stereo</span>
+                <b className={meters.corr < -0.25 ? 'warn' : ''}>{meters.corr.toFixed(2)}</b>
+              </div>
+              <div className="corr-wrap">
+                <div className="corr"><i style={{ left: `${(meters.corr + 1) * 50}%` }} /></div>
+                <div className="corr-labels">
+                  <span>-1.0 (Out of Phase)</span>
+                  <span>0.0</span>
+                  <span>+1.0 (Mono / In Phase)</span>
+                </div>
+              </div>
+            </div>
           </div>
         </Card>
 
@@ -1687,17 +2138,41 @@ input[type=checkbox]{accent-color:var(--acc);width:16px;height:16px;margin-top:3
 .hint,small{color:var(--mute);font-size:13px}
 .lbl{margin:6px 0 0;color:var(--mute);font-size:13px}
 .chk{display:flex;gap:8px;align-items:flex-start;font-size:14px}
-.spec{display:flex;gap:10px;height:180px}
-.bar{position:relative;flex:1;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:repeating-linear-gradient(0deg,color-mix(in srgb,var(--line) 75%,transparent) 0 6px,transparent 6px 9px),var(--bg)}
+.spec-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between}
+.spec-board{display:grid;grid-template-columns:42px 1fr;gap:10px;align-items:stretch;padding:14px;border-radius:14px;background:var(--bg);border:1px solid var(--line)}
+.spec-scale{display:flex;flex-direction:column;justify-content:space-between;padding:24px 0 58px;font-size:11px;color:var(--mute);font-variant-numeric:tabular-nums;text-align:right}
+.spec{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;min-width:0}
+.band-col{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0}
+.band-top-readout{display:inline-flex;align-items:baseline;gap:2px;height:20px;font-variant-numeric:tabular-nums}
+.band-top-readout b{font-size:12.5px;font-weight:700;color:var(--text)}
+.band-top-readout small{font-size:10px;color:var(--mute)}
+.bar{position:relative;width:100%;height:165px;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:repeating-linear-gradient(0deg,color-mix(in srgb,var(--line) 75%,transparent) 0 6px,transparent 6px 9px),color-mix(in srgb,var(--panel) 70%,var(--bg))}
 .fill{position:absolute;inset:0;transition:clip-path .08s linear;background:linear-gradient(0deg,var(--acc) 0 62%,#ffd166 84%,#ff5d5d);-webkit-mask:repeating-linear-gradient(0deg,#000 0 6px,transparent 6px 9px);mask:repeating-linear-gradient(0deg,#000 0 6px,transparent 6px 9px)}
-.tgt{position:absolute;left:0;right:0;height:0;border-top:2px dashed var(--text)}
-.bar span{position:absolute;bottom:5px;left:0;right:0;text-align:center;font-size:12px;font-weight:600;text-shadow:0 0 5px var(--bg)}
-.meter{display:flex;gap:10px;align-items:center}.meter.grow{flex:1;min-width:230px}
-.meter span{color:var(--mute);font-size:13px}
-.meter b{min-width:76px;padding:2px 10px;text-align:center;font-variant-numeric:tabular-nums;background:var(--bg);border:1px solid var(--line);border-radius:7px}
+.pk-marker{position:absolute;left:2px;right:2px;height:2px;background:var(--text);border-radius:99px;pointer-events:none;box-shadow:0 0 4px var(--bg)}
+.tgt{position:absolute;left:0;right:0;height:0;border-top:2px dashed #ffd166;pointer-events:none}
+.band-foot{display:flex;flex-direction:column;align-items:center;gap:1px;text-align:center;min-height:46px;width:100%}
+.band-name{font-size:12.5px;font-weight:650;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.band-range{font-size:10.5px;color:var(--mute);font-variant-numeric:tabular-nums}
+.band-delta{font-size:10.5px;font-weight:600;font-variant-numeric:tabular-nums;padding:1px 6px;border-radius:999px;background:var(--panel);border:1px solid var(--line)}
+.band-delta.ok{color:#34d399;border-color:color-mix(in srgb,#34d399 45%,transparent)}
+.band-delta.hi{color:#fbbf24;border-color:color-mix(in srgb,#fbbf24 45%,transparent)}
+.band-delta.lo{color:#60a5fa;border-color:color-mix(in srgb,#60a5fa 45%,transparent)}
+.meter-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr));gap:10px}
+.meter-card{display:flex;flex-direction:column;justify-content:center;gap:8px;padding:12px 14px;border-radius:12px;background:var(--bg);border:1px solid var(--line)}
+.meter-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.meter-head span{color:var(--mute);font-size:13px}
+.meter-head b{padding:3px 10px;font-size:13.5px;font-variant-numeric:tabular-nums;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+.meter-sub{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--mute);font-variant-numeric:tabular-nums}
+.clip-badge{padding:2px 7px;border-radius:999px;font-size:10.5px;font-weight:700;color:#fff;background:#ef4444}
+.lr-bars{display:flex;flex-direction:column;gap:6px}
+.lr-row{display:grid;grid-template-columns:16px 1fr;gap:8px;align-items:center;font-size:11.5px;color:var(--mute)}
+.lr-track{height:7px;border-radius:999px;background:var(--panel);border:1px solid var(--line);overflow:hidden}
+.lr-track i{display:block;height:100%;background:var(--acc);transition:width .08s linear}
 .warn{color:#ff6b6b;border-color:#ff6b6b!important}
-.corr{position:relative;flex:1;height:8px;border-radius:4px;background:linear-gradient(90deg,#d6453d,var(--line) 50%,var(--acc))}
-.corr i{position:absolute;top:-4px;width:4px;height:16px;border-radius:2px;background:var(--text);transform:translateX(-2px)}
+.corr-wrap{display:flex;flex-direction:column;gap:5px}
+.corr{position:relative;width:100%;height:9px;border-radius:999px;background:linear-gradient(90deg,#d6453d,var(--line) 50%,var(--acc))}
+.corr i{position:absolute;top:-4px;width:4px;height:17px;border-radius:2px;background:var(--text);transform:translateX(-2px)}
+.corr-labels{display:flex;justify-content:space-between;font-size:10.5px;color:var(--mute)}
 .txt{flex:1;min-width:180px;padding:8px 12px;font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:10px}
 .notes,.checks{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
 .notes li{display:flex;gap:10px;align-items:center;padding:8px 11px;background:var(--bg);border:1px solid var(--line);border-radius:10px}
@@ -1708,6 +2183,7 @@ input[type=checkbox]{accent-color:var(--acc);width:16px;height:16px;margin-top:3
 .checks label{display:flex;gap:10px;cursor:pointer}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:9;padding:9px 18px;font-weight:600;color:var(--bg);background:var(--acc);border-radius:10px}
 .tuner-box{display:flex;flex-direction:column;gap:12px}
+.tuner-controls{display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;background:var(--bg);border:1px solid var(--line)}
 .tuner-status{font-size:12.5px;font-weight:600;padding:4px 10px;border-radius:999px;background:var(--bg);border:1px solid var(--line);color:var(--mute)}
 .tuner-status.ok{color:#34d399;border-color:#34d399;background:color-mix(in srgb,#34d399 12%,var(--bg))}
 .tuner-readout{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-radius:12px;background:var(--bg);border:1px solid var(--line)}
@@ -1725,24 +2201,26 @@ input[type=checkbox]{accent-color:var(--acc);width:16px;height:16px;margin-top:3
 .tuner-ref{display:flex;flex-direction:column;gap:6px}
 .eq-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
 .eq-stage{position:relative}
-.eqg{display:block;width:100%;height:auto;touch-action:none;background:var(--bg);border:1px solid var(--line);border-radius:14px}
+.eqg{display:block;width:100%;height:auto;touch-action:none;background:radial-gradient(680px 220px at 50% 50%,color-mix(in srgb,var(--acc) 9%,transparent),transparent),var(--bg);border:1px solid var(--line);border-radius:14px;box-shadow:inset 0 1px 0 color-mix(in srgb,var(--text) 6%,transparent)}
 .eqg.off{opacity:.42;filter:grayscale(.5)}
-.eqg .gl{stroke:color-mix(in srgb,var(--line) 85%,transparent);stroke-width:1}
-.eqg .z{stroke:color-mix(in srgb,var(--mute) 75%,transparent);stroke-dasharray:5 4;stroke-width:1.2}
+.eqg .gl{stroke:color-mix(in srgb,var(--line) 80%,transparent);stroke-width:1}
+.eqg .z{stroke:color-mix(in srgb,var(--mute) 72%,transparent);stroke-dasharray:5 4;stroke-width:1.25}
 .eqg .gt{fill:var(--mute);font-size:11px;font-variant-numeric:tabular-nums}
 .eqg .ar{transition:opacity .15s}
-.eqg .cv{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
-.eqg .node{pointer-events:none;transition:r .14s ease,fill .14s ease}
+.eqg .cv{fill:none;stroke-width:3.4;stroke-linecap:round;stroke-linejoin:round}
+.eqg .node{pointer-events:none;transition:r .15s ease,fill .15s ease}
+.eqg .pulse-ring{pointer-events:none}
 .eqg .nt{font-size:11.5px;font-weight:700;text-anchor:middle;pointer-events:none;font-variant-numeric:tabular-nums}
 .eqg .hit{cursor:grab;outline:none}.eqg .hit:active{cursor:grabbing}.eqg .hit:focus-visible{stroke:var(--text);stroke-width:2}
-.eq-hud{position:absolute;top:10px;right:12px;display:inline-flex;align-items:center;gap:8px;padding:5px 11px;border-radius:999px;background:var(--panel);border:1px solid var(--line);font-size:12px;font-variant-numeric:tabular-nums;pointer-events:none}
+.eq-hud{position:absolute;top:10px;right:12px;display:inline-flex;flex-wrap:wrap;align-items:center;gap:8px;padding:5px 12px;border-radius:999px;background:color-mix(in srgb,var(--panel) 92%,transparent);backdrop-filter:blur(6px);border:1px solid var(--line);font-size:12px;font-variant-numeric:tabular-nums;pointer-events:none}
 .eq-hud b{color:var(--text)}
 .eq-hud .hud-gain{color:var(--acc);font-weight:700}
+.eq-hud .hud-cursor{color:var(--mute);font-size:11.5px}
 .hud-dot,.bdot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .bands{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(190px,100%),1fr));gap:10px}
-.band{display:flex;flex-direction:column;gap:8px;padding:12px;cursor:pointer;background:var(--bg);border:1px solid var(--line);border-radius:12px;transition:border-color .15s}
+.band{display:flex;flex-direction:column;gap:8px;padding:12px;cursor:pointer;background:var(--bg);border:1px solid var(--line);border-radius:12px;transition:border-color .15s,transform .15s}
 .band:hover{border-color:color-mix(in srgb,var(--bcol,var(--acc)) 65%,var(--line))}
-.band.sel{border-color:var(--bcol,var(--acc))}
+.band.sel{border-color:var(--bcol,var(--acc));box-shadow:0 0 0 1px color-mix(in srgb,var(--bcol,var(--acc)) 28%,transparent)}
 .band-head{display:flex;align-items:center;gap:7px}
 .band .sl{grid-template-columns:38px 1fr 62px;gap:6px}
 .band .sl b{grid-column:auto;text-align:right;font-size:12px}
@@ -1754,30 +2232,27 @@ input:disabled{opacity:.35}
 .keys{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:10px}
 .kbox{display:flex;flex-direction:column;gap:2px;padding:12px;background:var(--bg);border:1px solid var(--line);border-radius:12px}
 .kbox.act{border-color:var(--acc)}.kbox b{font-size:20px}
-.now-box{display:flex;flex-direction:column;gap:8px;padding:12px;background:var(--bg);border:1px solid var(--line);border-radius:12px}
-.now{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
-.now span{font-size:38px;font-weight:700;line-height:1.1;color:var(--acc);letter-spacing:-.02em}
-.voicing-bar{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--mute);padding-top:6px;border-top:1px dashed var(--line)}
-.voicing-bar b{color:var(--text);font-weight:600}
-.sheet-opts{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
-.chord-sheet{display:grid;gap:8px;padding:12px;background:var(--bg);border:1px solid var(--line);border-radius:12px;max-height:260px;overflow:auto}
-.chord-sheet.view-grid{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}
-.chord-sheet.view-timeline{display:flex;flex-wrap:nowrap;overflow-x:auto;max-height:none;align-items:stretch}
-.chord-sheet.view-compact{grid-template-columns:repeat(auto-fill,minmax(94px,1fr));gap:6px}
-.sheet-cell{position:relative;display:flex;align-items:stretch;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;min-width:104px;flex-shrink:0;transition:border-color .15s}
-.sheet-cell.past{opacity:.65}
-.sheet-cell.cur{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 16%,var(--panel));opacity:1}
-.sheet-cell.edited::after{content:'';position:absolute;top:5px;right:26px;width:6px;height:6px;border-radius:50%;background:#ffd166}
-.cell-main{flex:1;flex-direction:column;align-items:flex-start;gap:2px;padding:8px 26px 8px 10px;background:transparent;border:0;border-radius:0;text-align:left}
-.cell-main:hover:not(:disabled){border-color:transparent;background:color-mix(in srgb,var(--acc) 8%,transparent)}
-.cell-idx{font-size:11px;color:var(--mute);font-variant-numeric:tabular-nums}
-.cell-ch{font-size:16px;font-weight:700;color:var(--text);line-height:1.2}
-.sheet-cell.cur .cell-ch{color:var(--acc)}
-.cell-sub{font-size:11px;color:var(--mute)}
-.cell-edit{position:absolute;top:4px;right:4px;padding:4px;min-height:unset!important;background:transparent;border:0;color:var(--mute);opacity:.75}
-.cell-edit:hover:not(:disabled){opacity:1;color:var(--acc)}
-.edit-inline{display:flex;align-items:center;gap:4px;padding:6px;width:100%}
-.mini-in{width:100%;min-width:0;padding:4px 6px;font-size:13px;color:var(--text);background:var(--bg);border:1px solid var(--acc);border-radius:6px}
+.dict-box{display:flex;flex-direction:column;gap:12px;padding:14px;border-radius:12px;background:var(--bg);border:1px solid var(--line)}
+.dict-top{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+.dict-summary{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:10px;background:var(--panel);border:1px solid var(--line)}
+.dict-summary b{font-size:16px;color:var(--acc)}
+.dict-pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.dpill{display:inline-flex;align-items:baseline;gap:5px;padding:4px 9px;border-radius:8px;background:var(--bg);border:1px solid var(--line);font-size:12.5px}
+.dpill.root{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 16%,var(--bg));color:var(--acc)}
+.dpill small{font-size:10.5px;color:var(--mute)}
+.fretboard-wrap{overflow-x:auto;padding-bottom:4px}
+.fret-grid{display:grid;grid-template-columns:68px repeat(var(--fret-cols,6),minmax(54px,1fr));min-width:390px;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.fret-corner,.fret-num,.fret-str-lbl{display:flex;align-items:center;justify-content:center;padding:6px 4px;font-size:11.5px;font-weight:600;color:var(--mute);background:color-mix(in srgb,var(--bg) 70%,var(--panel));border-bottom:1px solid var(--line);border-right:1px solid var(--line)}
+.fret-row-group{display:contents}
+.fret-cell{position:relative;display:flex;align-items:center;justify-content:center;min-height:42px;border-bottom:1px solid var(--line);border-right:1px solid color-mix(in srgb,var(--line) 65%,transparent)}
+.fret-cell.open-col{border-right:2.5px solid var(--mute);background:color-mix(in srgb,var(--bg) 45%,transparent)}
+.fret-cell.hit{background:color-mix(in srgb,var(--acc) 10%,transparent)}
+.fret-cell.root{background:color-mix(in srgb,var(--acc) 22%,transparent)}
+.fret-dot{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:var(--acc);color:var(--bg);line-height:1.05;font-variant-numeric:tabular-nums}
+.fret-cell:not(.root) .fret-dot{background:color-mix(in srgb,var(--acc) 24%,var(--bg));color:var(--text);border:1.5px solid var(--acc)}
+.fret-dot b{font-size:11.5px;font-weight:700}
+.fret-dot small{font-size:9px;opacity:.85}
+.fret-empty{color:color-mix(in srgb,var(--mute) 35%,transparent);font-size:12px}
 .chips{display:flex;gap:6px;flex-wrap:wrap}
 .chips button{flex-direction:column;gap:0;align-items:center;padding:5px 10px;min-width:58px}
 .chips button small{font-size:11px;color:inherit;opacity:.75}
