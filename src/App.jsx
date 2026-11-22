@@ -1,882 +1,616 @@
-import React, { useState, useRef, useEffect } from 'react';
-import {
-  Play, Pause, Upload, Volume2, Smartphone, Car, Speaker, Headphones,
-  Activity, Sliders, AlertTriangle, CheckCircle2, Edit3, Repeat,
-  MessageSquarePlus, Trash2, Copy, Check, Scissors, Radio, Layers,
-  CheckSquare, Square, Download
-} from 'lucide-react';
+// DIY Studio & Stage Console v4.1  —  Vite + React + lucide-react + Web Audio API
+import { useEffect, useRef, useState } from 'react'
+import { Play, Pause, Upload, Scissors, Copy, Trash2, Repeat, Download, StickyNote } from 'lucide-react'
 
+/* ---------- Konstanta ---------- */
+const THEMES = {
+  midnight: { n: 'Midnight Blue', bg: '#0b1220', panel: '#121b2e', line: '#223152', text: '#e6ecf8', mute: '#8a99b8', acc: '#5aa2ff' },
+  crimson: { n: 'Crimson Rock', bg: '#140a0b', panel: '#1e1214', line: '#3a2226', text: '#f6e9e9', mute: '#b39393', acc: '#ff4d4f' },
+  emerald: { n: 'Emerald Studio', bg: '#08130f', panel: '#0f1d17', line: '#1f3a2e', text: '#e4f4ec', mute: '#86a898', acc: '#2fd08a' },
+}
+const BANDS = [['Sub', 20, 60], ['Bass', 60, 250], ['Low-Mid', 250, 2000], ['High-Mid', 2000, 6000], ['Treble', 6000, 16000]]
+const PUNK_TARGET = [-3, 2, 0, 3, 1] // dB relatif terhadap rata-rata spektrum (kurva target punk / alt-rock)
+const DEVICES = {
+  flat: { n: 'Studio Flat', hp: 10, lp: 20000, ls: 0 },
+  phone: { n: 'Speaker HP', hp: 450, lp: 7500, ls: -4 },
+  car: { n: 'Audio Mobil', hp: 30, lp: 12000, ls: 7 },
+  live: { n: 'Sound Live', hp: 70, lp: 9000, ls: 3 },
+}
+const SOLO = { off: [10, 20000], low: [10, 250], mid: [250, 4000], high: [4000, 20000] }
+const MATRIX = { // [outL<-L, outL<-R, outR<-L, outR<-R]
+  stereo: [1, 0, 0, 1], mono: [.5, .5, .5, .5], side: [.5, -.5, .5, -.5],
+}
+const CHECKS = [
+  'Master sudah dicek di speaker HP, earphone, dan speaker studio',
+  'Level puncak tidak clipping (di bawah -1 dBTP)',
+  'Loudness mendekati -14 LUFS (acuan streaming)',
+  'Cek mono compatibility (korelasi tidak mendekati -1)',
+  'Intro & outro bersih, tanpa klik atau noise',
+  'Metadata siap: judul, artis, ISRC, tahun rilis',
+  'Cover art 3000×3000 px, format JPG/PNG',
+  'Lirik & kredit penulis lagu sudah final',
+]
+
+/* ---------- Utilitas ---------- */
+const fmt = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`
+const db = x => (x > 1e-6 ? 20 * Math.log10(x) : -120)
+
+function detectBpm(buf) {
+  const sr = buf.sampleRate, d = buf.getChannelData(0)
+  const n = Math.min(d.length, sr * 60), hop = Math.round(sr / 400), fs = sr / hop
+  const env = []
+  for (let i = 0; i + hop <= n; i += hop) { let s = 0; for (let j = 0; j < hop; j += 2) s += d[i + j] * d[i + j]; env.push(Math.sqrt(s)) }
+  const on = env.map((v, i) => Math.max(0, v - (env[i - 1] || 0)))
+  let best = 0, bestLag = 0
+  for (let lag = Math.floor(fs * 60 / 200); lag <= Math.ceil(fs * 60 / 60); lag++) {
+    let s = 0
+    for (let i = 0; i + lag < on.length; i++) s += on[i] * on[i + lag]
+    s /= on.length - lag
+    if (s > best) { best = s; bestLag = lag }
+  }
+  if (!bestLag) return null
+  let bpm = 60 * fs / bestLag
+  while (bpm < 80) bpm *= 2
+  while (bpm > 190) bpm /= 2
+  return Math.round(bpm)
+}
+
+function estimateLufs(buf) { // perkiraan kasar berbasis RMS (bukan K-weighted penuh)
+  const d = buf.getChannelData(0); let s = 0, c = 0
+  for (let i = 0; i < d.length; i += 4) { s += d[i] * d[i]; c++ }
+  return db(Math.sqrt(s / c)) - 0.7
+}
+
+function waveformPeaks(buf, N = 600) {
+  const d = buf.getChannelData(0), bk = Math.floor(d.length / N), p = []
+  for (let i = 0; i < N; i++) { let m = 0; for (let j = i * bk; j < (i + 1) * bk; j += 8) m = Math.max(m, Math.abs(d[j])); p.push(m) }
+  return p
+}
+
+function encodeWav(chs, sr) {
+  const len = chs[0].length, nc = chs.length, buf = new ArrayBuffer(44 + len * nc * 2), v = new DataView(buf)
+  const w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)))
+  w(0, 'RIFF'); v.setUint32(4, 36 + len * nc * 2, true); w(8, 'WAVEfmt ')
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, nc, true)
+  v.setUint32(24, sr, true); v.setUint32(28, sr * nc * 2, true); v.setUint16(32, nc * 2, true); v.setUint16(34, 16, true)
+  w(36, 'data'); v.setUint32(40, len * nc * 2, true)
+  let o = 44
+  for (let i = 0; i < len; i++) for (let c = 0; c < nc; c++) { const x = Math.max(-1, Math.min(1, chs[c][i])); v.setInt16(o, x < 0 ? x * 0x8000 : x * 0x7fff, true); o += 2 }
+  return new Blob([buf], { type: 'audio/wav' })
+}
+
+function download(blob, name) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000)
+}
+
+/* ---------- Audio engine ---------- */
+function createEngine() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'playback' }) // anti-kresek IEM
+  const bq = (type, f, q = 0.707) => { const x = ctx.createBiquadFilter(); x.type = type; x.frequency.value = f; x.Q.value = q; return x }
+  const eq = [bq('lowshelf', 200), bq('peaking', 1000, 0.8), bq('highshelf', 4000)]
+  eq[0].connect(eq[1]); eq[1].connect(eq[2])
+  const gA = ctx.createGain(), gB = ctx.createGain(), bus = ctx.createGain()
+  eq[2].connect(gA); gA.connect(bus); gB.connect(bus)
+
+  // analisis stereo (korelasi) — pre monitor
+  const sp = ctx.createChannelSplitter(2), anL = ctx.createAnalyser(), anR = ctx.createAnalyser()
+  anL.fftSize = anR.fftSize = 2048
+  bus.connect(sp); sp.connect(anL, 0); sp.connect(anR, 1)
+
+  // matriks kanal (Stereo / Mono / Side / Vocal Remover)
+  const sp2 = ctx.createChannelSplitter(2), mg = ctx.createChannelMerger(2), mx = []
+  bus.connect(sp2)
+  for (let o = 0; o < 2; o++) for (let i = 0; i < 2; i++) { const g = ctx.createGain(); sp2.connect(g, i); g.connect(mg, 0, o); mx.push(g) }
+
+  // solo band → simulasi perangkat → analyser → master
+  const sHp = bq('highpass', 10), sLp = bq('lowpass', 20000), dHp = bq('highpass', 10), dLp = bq('lowpass', 20000), dLs = bq('lowshelf', 120)
+  const an = ctx.createAnalyser(); an.fftSize = 4096; an.smoothingTimeConstant = 0.8
+  const master = ctx.createGain()
+  mg.connect(sHp); sHp.connect(sLp); sLp.connect(dHp); dHp.connect(dLp); dLp.connect(dLs); dLs.connect(an); an.connect(master); master.connect(ctx.destination)
+
+  // ambient noise (langsung ke output, tidak ikut fade transport)
+  const nb = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), nd = nb.getChannelData(0)
+  for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1
+  const ns = ctx.createBufferSource(); ns.buffer = nb; ns.loop = true
+  const nFilter = bq('bandpass', 1400, 0.35), nGain = ctx.createGain(), lfo = ctx.createOscillator(), lfoG = ctx.createGain()
+  nGain.gain.value = 0; lfo.frequency.value = 0.25
+  ns.connect(nFilter); nFilter.connect(nGain); nGain.connect(ctx.destination)
+  lfo.connect(lfoG); lfoG.connect(nGain.gain); ns.start(); lfo.start()
+
+  master.gain.value = 1
+  return { ctx, eq, gA, gB, master, mx, anL, anR, an, sHp, sLp, dHp, dLp, dLs, nFilter, nGain, lfoG }
+}
+
+/* ---------- Komponen kecil ---------- */
+const Card = ({ title, children, wide }) => (
+  <section className={`card${wide ? ' wide' : ''}`}><h2>{title}</h2>{children}</section>
+)
+const Slider = ({ label, value, onChange, min = 0, max = 1, step = 0.01, show }) => (
+  <label className="sl"><span>{label}</span>
+    <input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(+e.target.value)}
+      style={{ '--p': `${((value - min) / (max - min)) * 100}%` }} />
+    <b>{show ?? value}</b></label>
+)
+const Seg = ({ value, options, onChange }) => (
+  <div className="seg">{options.map(([k, l]) => <button key={k} className={value === k ? 'on' : ''} onClick={() => onChange(k)}>{l}</button>)}</div>
+)
+
+/* ---------- App ---------- */
 export default function App() {
-  const [bandName, setBandName] = useState(() => localStorage.getItem('bandName') || 'KIRANA');
-  const [isEditingName, setIsEditingName] = useState(false);
-  const [activeTab, setActiveTab] = useState('studio'); // 'studio' | 'stage'
+  const [theme, setTheme] = useState('midnight')
+  const [tab, setTab] = useState(1)
+  const [ready, setReady] = useState(false)
+  const [files, setFiles] = useState({ A: null, B: null })
+  const [active, setActive] = useState('A')
+  const [playing, setPlaying] = useState(false)
+  const [pos, setPos] = useState(0)
+  const [vol, setVol] = useState({ A: 0.8, B: 0.8 })
+  const [loop, setLoop] = useState({ a: null, b: null, on: false })
+  const [rate, setRate] = useState(1)
+  const [eqv, setEqv] = useState([0, 0, 0])
+  const [device, setDevice] = useState('flat')
+  const [solo, setSolo] = useState('off')
+  const [ch, setCh] = useState('stereo')
+  const [vocalRm, setVocalRm] = useState(false)
+  const [spot, setSpot] = useState(false)
+  const [noise, setNoise] = useState({ mode: 'off', level: 0.4 })
+  const [punk, setPunk] = useState(true)
+  const [meters, setMeters] = useState({ bands: [-90, -90, -90, -90, -90], peak: -120, corr: 0 })
+  const [notes, setNotes] = useState([])
+  const [noteText, setNoteText] = useState('')
+  const [promoLen, setPromoLen] = useState(30)
+  const [promoStart, setPromoStart] = useState(null) // null = otomatis (Loop A, atau posisi putar)
+  const [checks, setChecks] = useState(() => { try { return JSON.parse(localStorage.getItem('cmb-checks')) || [] } catch { return [] } })
+  const [msg, setMsg] = useState('')
+  const [vw, setVw] = useState(0) // memicu gambar ulang waveform saat layar berubah
 
-  // Audio Playback State
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [activeTrack, setActiveTrack] = useState('A');
-  const [trackAName, setTrackAName] = useState('Belum ada file Mix Band');
-  const [trackBName, setTrackBName] = useState('Belum ada file Referensi');
-  const [gainA, setGainA] = useState(1.0);
-  const [gainB, setGainB] = useState(0.85);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const eng = useRef(null), ps = useRef({ src: null, off: 0, t: 0, rate: 1 }), posRef = useRef(0)
+  const S = useRef({}), smooth = useRef([-90, -90, -90, -90, -90]), canvas = useRef(null), seekEl = useRef(null)
+  S.current = { ...S.current, files, active, loop, rate, playing }
 
-  // Waveform Peaks
-  const [waveA, setWaveA] = useState(Array(64).fill(20));
-  const [waveB, setWaveB] = useState(Array(64).fill(20));
+  const ensure = () => {
+    if (!eng.current) { eng.current = createEngine(); setReady(true) }
+    if (eng.current.ctx.state === 'suspended') eng.current.ctx.resume()
+    return eng.current
+  }
+  const setP = v => { posRef.current = v; setPos(v) }
+  const flash = t => { setMsg(t); setTimeout(() => setMsg(''), 2200) }
+  const cur = files[active]
+  const dur = cur?.buf.duration || 0
+  const loopOk = l => l.a != null && l.b != null && l.b > l.a
 
-  // Diagnostic & Routing Modes
-  const [channelMode, setChannelMode] = useState('stereo'); // 'stereo' | 'mono' | 'mid' | 'side'
-  const [freqSolo, setFreqSolo] = useState('all'); // 'all' | 'low' | 'mid' | 'high'
-  const [deviceMode, setDeviceMode] = useState('studio'); // 'studio' | 'phone' | 'car' | 'club' | 'spotify'
-  const [freqBars, setFreqBars] = useState([12, 12, 12, 12, 12]);
-  const [peakDb, setPeakDb] = useState(-60);
-  const [correlation, setCorrelation] = useState(1.0);
-
-  // A-B Loop State
-  const [loopA, setLoopA] = useState(null);
-  const [loopB, setLoopB] = useState(null);
-  const [isLoopActive, setIsLoopActive] = useState(false);
-
-  // Timestamped Mix Notes
-  const [notes, setNotes] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('kiranaMixNotes')) || []; } catch { return []; }
-  });
-  const [noteInput, setNoteInput] = useState('');
-  const [copiedNotes, setCopiedNotes] = useState(false);
-
-  // Pre-Release Checklist
-  const [checklist, setChecklist] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem('kiranaChecklist')) || [
-        { id: 1, text: 'Headroom aman di bawah -1.0 dBTP (Tidak Clipping)', done: false },
-        { id: 2, text: 'Vokal & gitar tetap jelas saat Mode MONO aktif', done: false },
-        { id: 3, text: 'Bass & Kick tetap terdengar di simulasi Speaker HP', done: false },
-        { id: 4, text: 'Keseimbangan frekuensi sudah mendekati Lagu Referensi', done: false },
-        { id: 5, text: 'Format export WAV 44.1 kHz (16-bit atau 24-bit)', done: false },
-      ];
-    } catch { return []; }
-  });
-
-  // Stage & Promo State
-  const [snippetStart, setSnippetStart] = useState(0);
-  const [snippetLen, setSnippetLen] = useState(15);
-  const [isExporting, setIsExporting] = useState(false);
-  const [stagePan, setStagePan] = useState(0); // -1 Left, 0 Center, 1 Right
-
-  // Web Audio Refs
-  const audioCtxRef = useRef(null);
-  const bufferARef = useRef(null);
-  const bufferBRef = useRef(null);
-  const sourceRef = useRef(null);
-  const gainNodeRef = useRef(null);
-  const filterLowRef = useRef(null);
-  const filterHighRef = useRef(null);
-  const soloFilterRef = useRef(null);
-  const processorRef = useRef(null);
-  const pannerRef = useRef(null);
-  const analyserRef = useRef(null);
-  const animRef = useRef(null);
-  const startTimeRef = useRef(0);
-  const offsetRef = useRef(0);
-
-  // Sync Refs for real-time ScriptProcessor / Loop checks
-  const channelModeRef = useRef(channelMode);
-  const loopARef = useRef(loopA);
-  const loopBRef = useRef(loopB);
-  const isLoopActiveRef = useRef(isLoopActive);
-
-  useEffect(() => { channelModeRef.current = channelMode; }, [channelMode]);
-  useEffect(() => { loopARef.current = loopA; }, [loopA]);
-  useEffect(() => { loopBRef.current = loopB; }, [loopB]);
-  useEffect(() => { isLoopActiveRef.current = isLoopActive; }, [isLoopActive]);
-
-  useEffect(() => {
-    localStorage.setItem('kiranaMixNotes', JSON.stringify(notes));
-  }, [notes]);
-
-  useEffect(() => {
-    localStorage.setItem('kiranaChecklist', JSON.stringify(checklist));
-  }, [checklist]);
-
-  const initAudio = () => {
-    if (!audioCtxRef.current) {
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      const ctx = new AudioContext();
-      audioCtxRef.current = ctx;
-
-      analyserRef.current = ctx.createAnalyser();
-      analyserRef.current.fftSize = 256;
-
-      gainNodeRef.current = ctx.createGain();
-      filterLowRef.current = ctx.createBiquadFilter();
-      filterHighRef.current = ctx.createBiquadFilter();
-      soloFilterRef.current = ctx.createBiquadFilter();
-      pannerRef.current = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
-
-      // Custom Processor for Mono, Mid, Side & Phase Correlation
-      const proc = ctx.createScriptProcessor(2048, 2, 2);
-      proc.onaudioprocess = (e) => {
-        const inL = e.inputBuffer.getChannelData(0);
-        const inR = e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : inL;
-        const outL = e.outputBuffer.getChannelData(0);
-        const outR = e.outputBuffer.getChannelData(1);
-
-        let sumLR = 0, sumL2 = 0, sumR2 = 0;
-        const mode = channelModeRef.current;
-
-        for (let i = 0; i < inL.length; i++) {
-          const l = inL[i];
-          const r = inR[i];
-          sumLR += l * r;
-          sumL2 += l * l;
-          sumR2 += r * r;
-
-          if (mode === 'mono') {
-            const m = (l + r) * 0.5;
-            outL[i] = m;
-            outR[i] = m;
-          } else if (mode === 'mid') {
-            const m = (l + r) * 0.5;
-            outL[i] = m;
-            outR[i] = m;
-          } else if (mode === 'side') {
-            const s = (l - r) * 0.5;
-            outL[i] = s;
-            outR[i] = -s;
-          } else {
-            outL[i] = l;
-            outR[i] = r;
-          }
-        }
-
-        const denom = Math.sqrt(sumL2 * sumR2);
-        if (denom > 0.00001) {
-          const corr = Math.max(-1, Math.min(1, sumLR / denom));
-          setCorrelation(corr);
-        }
-      };
-      processorRef.current = proc;
-    }
-  };
-
-  const extractWaveform = (audioBuffer) => {
-    const raw = audioBuffer.getChannelData(0);
-    const samples = 64;
-    const blockSize = Math.floor(raw.length / samples);
-    const peaks = [];
-    for (let i = 0; i < samples; i++) {
-      let max = 0;
-      for (let j = 0; j < blockSize; j += 10) {
-        const val = Math.abs(raw[i * blockSize + j] || 0);
-        if (val > max) max = val;
-      }
-      peaks.push(Math.max(10, Math.min(100, max * 100)));
-    }
-    return peaks;
-  };
-
-  const handleFileUpload = async (e, track) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    initAudio();
-    const arrayBuffer = await file.arrayBuffer();
-    const audioBuffer = await audioCtxRef.current.decodeAudioData(arrayBuffer);
-    const peaks = extractWaveform(audioBuffer);
-
-    if (track === 'A') {
-      bufferARef.current = audioBuffer;
-      setTrackAName(file.name);
-      setWaveA(peaks);
-      if (activeTrack === 'A') {
-        setDuration(audioBuffer.duration);
-        setSnippetStart(0);
-      }
-    } else {
-      bufferBRef.current = audioBuffer;
-      setTrackBName(file.name);
-      setWaveB(peaks);
-      if (activeTrack === 'B') setDuration(audioBuffer.duration);
-    }
-  };
-
-  // Update Gain & Device Normalization
-  useEffect(() => {
-    if (gainNodeRef.current && audioCtxRef.current) {
-      let baseGain = activeTrack === 'A' ? gainA : gainB;
-      if (deviceMode === 'spotify') baseGain *= 0.72; // Simulate -14 LUFS normalization drop
-      gainNodeRef.current.gain.setValueAtTime(baseGain, audioCtxRef.current.currentTime);
-    }
-  }, [gainA, gainB, activeTrack, deviceMode]);
-
-  // Update Device EQ Simulation
-  useEffect(() => {
-    if (!filterLowRef.current || !filterHighRef.current || !audioCtxRef.current) return;
-    const ctx = audioCtxRef.current;
-    if (deviceMode === 'phone') {
-      filterLowRef.current.type = 'highpass';
-      filterLowRef.current.frequency.setValueAtTime(320, ctx.currentTime);
-      filterHighRef.current.type = 'lowpass';
-      filterHighRef.current.frequency.setValueAtTime(3800, ctx.currentTime);
-    } else if (deviceMode === 'car') {
-      filterLowRef.current.type = 'peaking';
-      filterLowRef.current.frequency.setValueAtTime(110, ctx.currentTime);
-      filterLowRef.current.gain.setValueAtTime(6, ctx.currentTime);
-      filterHighRef.current.type = 'lowpass';
-      filterHighRef.current.frequency.setValueAtTime(11000, ctx.currentTime);
-    } else if (deviceMode === 'club') {
-      filterLowRef.current.type = 'lowshelf';
-      filterLowRef.current.frequency.setValueAtTime(80, ctx.currentTime);
-      filterLowRef.current.gain.setValueAtTime(8, ctx.currentTime);
-      filterHighRef.current.type = 'allpass';
-    } else {
-      filterLowRef.current.type = 'allpass';
-      filterHighRef.current.type = 'allpass';
-    }
-  }, [deviceMode]);
-
-  // Update Frequency Solo Filter
-  useEffect(() => {
-    if (!soloFilterRef.current || !audioCtxRef.current) return;
-    const ctx = audioCtxRef.current;
-    if (freqSolo === 'low') {
-      soloFilterRef.current.type = 'lowpass';
-      soloFilterRef.current.frequency.setValueAtTime(250, ctx.currentTime);
-      soloFilterRef.current.Q.setValueAtTime(0.7, ctx.currentTime);
-    } else if (freqSolo === 'mid') {
-      soloFilterRef.current.type = 'bandpass';
-      soloFilterRef.current.frequency.setValueAtTime(1200, ctx.currentTime);
-      soloFilterRef.current.Q.setValueAtTime(0.6, ctx.currentTime);
-    } else if (freqSolo === 'high') {
-      soloFilterRef.current.type = 'highpass';
-      soloFilterRef.current.frequency.setValueAtTime(4000, ctx.currentTime);
-      soloFilterRef.current.Q.setValueAtTime(0.7, ctx.currentTime);
-    } else {
-      soloFilterRef.current.type = 'allpass';
-    }
-  }, [freqSolo]);
-
-  // Update Stage Panner
-  useEffect(() => {
-    if (pannerRef.current && audioCtxRef.current) {
-      pannerRef.current.pan.setValueAtTime(stagePan, audioCtxRef.current.currentTime);
-    }
-  }, [stagePan]);
-
-  const stopAudio = () => {
-    if (sourceRef.current) {
-      try { sourceRef.current.stop(); } catch (e) {}
-      sourceRef.current.disconnect();
-      sourceRef.current = null;
-    }
-    cancelAnimationFrame(animRef.current);
-  };
-
-  const playFromOffset = (targetTrack, offset) => {
-    initAudio();
-    const ctx = audioCtxRef.current;
-    if (ctx.state === 'suspended') ctx.resume();
-    stopAudio();
-
-    const selectedBuffer = targetTrack === 'A' ? bufferARef.current : bufferBRef.current;
-    if (!selectedBuffer) {
-      alert(`Unggah dulu file audio untuk Track ${targetTrack}!`);
-      setIsPlaying(false);
-      return;
-    }
-
-    setDuration(selectedBuffer.duration);
-    const safeOffset = offset >= selectedBuffer.duration ? 0 : Math.max(0, offset);
-
-    const source = ctx.createBufferSource();
-    source.buffer = selectedBuffer;
-    source.loop = true;
-
-    let baseGain = targetTrack === 'A' ? gainA : gainB;
-    if (deviceMode === 'spotify') baseGain *= 0.72;
-    gainNodeRef.current.gain.setValueAtTime(baseGain, ctx.currentTime);
-
-    // Audio Chain: Source -> Gain -> DeviceLow -> DeviceHigh -> SoloFilter -> M/S Processor -> Panner -> Analyser -> Out
-    source.connect(gainNodeRef.current);
-    gainNodeRef.current.connect(filterLowRef.current);
-    filterLowRef.current.connect(filterHighRef.current);
-    filterHighRef.current.connect(soloFilterRef.current);
-    soloFilterRef.current.connect(processorRef.current);
-
-    if (pannerRef.current) {
-      processorRef.current.connect(pannerRef.current);
-      pannerRef.current.connect(analyserRef.current);
-    } else {
-      processorRef.current.connect(analyserRef.current);
-    }
-    analyserRef.current.connect(ctx.destination);
-
-    source.start(0, safeOffset);
-    sourceRef.current = source;
-    startTimeRef.current = ctx.currentTime - safeOffset;
-    setActiveTrack(targetTrack);
-    setIsPlaying(true);
-    updateVisualizer(selectedBuffer.duration);
-  };
-
+  /* ----- transport ----- */
+  const getPos = () => {
+    const e = eng.current, p = ps.current, s = S.current
+    if (!e || !s.playing) return posRef.current
+    let raw = p.off + (e.ctx.currentTime - p.t) * p.rate
+    const { a, b, on } = s.loop
+    if (on && loopOk(s.loop) && raw >= b) raw = a + ((raw - a) % (b - a))
+    return Math.max(0, Math.min(raw, s.files[s.active]?.buf.duration || 0))
+  }
+  const stopSrc = () => {
+    const e = eng.current, p = ps.current
+    if (!e || !p.src) return false
+    const s = p.src; ps.current = { ...p, src: null }
+    const t = e.ctx.currentTime
+    e.master.gain.cancelScheduledValues(t); e.master.gain.setValueAtTime(e.master.gain.value, t)
+    e.master.gain.linearRampToValueAtTime(0, t + 0.04) // fade-out 40ms
+    try { s.stop(t + 0.045) } catch { /* sudah berhenti */ }
+    return true
+  }
+  const start = (off, over = {}) => {
+    const e = eng.current, s = { ...S.current, ...over }, f = s.files[s.active]
+    if (!e || !f) return
+    const lp = s.loop.on && loopOk(s.loop)
+    if (lp && (off < s.loop.a || off >= s.loop.b)) off = s.loop.a
+    const src = e.ctx.createBufferSource()
+    src.buffer = f.buf; src.playbackRate.value = s.rate
+    if (lp) { src.loop = true; src.loopStart = s.loop.a; src.loopEnd = s.loop.b }
+    src.connect(s.active === 'A' ? e.eq[0] : e.gB)
+    const t = e.ctx.currentTime
+    e.master.gain.cancelScheduledValues(t); e.master.gain.setValueAtTime(0, t)
+    e.master.gain.linearRampToValueAtTime(1, t + 0.04) // fade-in 40ms
+    src.onended = () => { if (ps.current.src === src) { ps.current.src = null; S.current.playing = false; setPlaying(false); setP(0) } }
+    src.start(t, off)
+    ps.current = { src, off, t, rate: s.rate }
+    S.current.playing = true; setPlaying(true)
+  }
+  const restart = (off, over = {}) => {
+    if (stopSrc()) { setP(off); setTimeout(() => start(off, over), 50) } else start(off, over)
+  }
   const togglePlay = () => {
-    if (isPlaying) {
-      offsetRef.current = (audioCtxRef.current.currentTime - startTimeRef.current) % (duration || 1);
-      stopAudio();
-      setIsPlaying(false);
+    const e = ensure()
+    if (!S.current.files[S.current.active]) return flash('Unggah Track A atau B dulu')
+    if (S.current.playing) {
+      const p = getPos(); stopSrc(); S.current.playing = false; setPlaying(false); setP(p)
     } else {
-      playFromOffset(activeTrack, offsetRef.current);
+      e.ctx.resume(); start(posRef.current >= dur - 0.05 ? 0 : posRef.current)
     }
-  };
+  }
+  const seek = off => { setP(off); if (S.current.playing) restart(off) }
+  const switchTrack = x => {
+    if (!files[x] || x === active) return
+    const p = Math.min(getPos(), files[x].buf.duration - 0.1)
+    setActive(x); S.current.active = x; setP(p)
+    if (S.current.playing) restart(p, { active: x })
+  }
+  const changeLoop = next => {
+    setLoop(next); S.current.loop = next
+    if (S.current.playing) restart(getPos(), { loop: next })
+  }
+  const changeRate = r => {
+    setRate(r); S.current.rate = r
+    const e = eng.current, p = ps.current
+    if (e && p.src) { const now = getPos(); p.src.playbackRate.value = r; ps.current = { ...p, off: now, t: e.ctx.currentTime, rate: r } }
+  }
 
-  const updateVisualizer = (trackDur) => {
-    if (!analyserRef.current || !audioCtxRef.current) return;
-    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
-    analyserRef.current.getByteFrequencyData(dataArray);
+  /* ----- unggah + analisis otomatis ----- */
+  const load = async (slot, file) => {
+    if (!file) return
+    const e = ensure()
+    flash(`Membaca ${file.name}…`)
+    try {
+      const buf = await e.ctx.decodeAudioData(await file.arrayBuffer())
+      const lufs = estimateLufs(buf)
+      const info = { name: file.name, buf, peaks: waveformPeaks(buf), bpm: detectBpm(buf), lufs, norm: Math.min(1, 10 ** ((-14 - lufs) / 20)) }
+      setFiles(f => ({ ...f, [slot]: info }))
+      if (!S.current.files[active]) { setActive(slot); S.current.active = slot }
+      flash(`${file.name} siap · ${info.bpm ?? '?'} BPM`)
+    } catch { flash('File tidak bisa dibaca. Coba WAV / MP3.') }
+  }
 
-    const timeData = new Float32Array(analyserRef.current.fftSize);
-    analyserRef.current.getFloatTimeDomainData(timeData);
-    let maxVal = 0;
-    for (let i = 0; i < timeData.length; i++) {
-      if (Math.abs(timeData[i]) > maxVal) maxVal = Math.abs(timeData[i]);
-    }
-    const db = maxVal > 0 ? Math.max(-60, 20 * Math.log10(maxVal)) : -60;
-    setPeakDb(db);
+  /* ----- sinkron parameter audio ----- */
+  const set = (p, v, tc = 0.02) => p.setTargetAtTime(v, eng.current.ctx.currentTime, tc)
+  useEffect(() => {
+    if (!ready) return
+    const e = eng.current
+    set(e.gA.gain, vol.A * (spot && files.A ? files.A.norm : 1))
+    set(e.gB.gain, vol.B * (spot && files.B ? files.B.norm : 1))
+  }, [vol, spot, files, ready])
+  useEffect(() => { if (ready) eqv.forEach((g, i) => set(eng.current.eq[i].gain, g)) }, [eqv, ready])
+  useEffect(() => {
+    if (!ready) return
+    const e = eng.current, d = DEVICES[device]
+    set(e.dHp.frequency, d.hp); set(e.dLp.frequency, d.lp); set(e.dLs.gain, d.ls)
+  }, [device, ready])
+  useEffect(() => { if (ready) { const [h, l] = SOLO[solo]; set(eng.current.sHp.frequency, h); set(eng.current.sLp.frequency, l) } }, [solo, ready])
+  useEffect(() => {
+    if (!ready) return
+    const m = MATRIX[vocalRm ? 'side' : ch] // Vocal Remover = Center Cancel (L − R)
+    eng.current.mx.forEach((g, i) => set(g.gain, m[i], 0.01))
+  }, [ch, vocalRm, ready])
+  useEffect(() => {
+    if (!ready) return
+    const e = eng.current, g = noise.mode === 'off' ? 0 : noise.level * 0.25
+    if (noise.mode === 'cafe') { e.nFilter.type = 'bandpass'; e.nFilter.frequency.value = 1400; e.nFilter.Q.value = 0.35 }
+    if (noise.mode === 'street') { e.nFilter.type = 'lowpass'; e.nFilter.frequency.value = 350; e.nFilter.Q.value = 0.7 }
+    set(e.nGain.gain, g, 0.1); set(e.lfoG.gain, g * 0.35, 0.1)
+  }, [noise, ready])
 
-    const elapsed = (audioCtxRef.current.currentTime - startTimeRef.current) % (trackDur || 1);
-    setCurrentTime(elapsed);
-
-    // Handle A-B Section Loop
-    if (isLoopActiveRef.current && loopARef.current !== null && loopBRef.current !== null && loopBRef.current > loopARef.current) {
-      if (elapsed >= loopBRef.current) {
-        offsetRef.current = loopARef.current;
-        playFromOffset(activeTrack, loopARef.current);
-        return;
+  /* ----- meter & posisi (rAF) ----- */
+  useEffect(() => {
+    let id
+    const tick = () => {
+      const e = eng.current
+      if (e && S.current.playing) {
+        setP(getPos())
+        const f = new Float32Array(e.an.frequencyBinCount); e.an.getFloatFrequencyData(f)
+        const hz = e.ctx.sampleRate / e.an.fftSize
+        const raw = BANDS.map(([, lo, hi]) => { let s = 0, c = 0; for (let i = Math.floor(lo / hz); i <= Math.ceil(hi / hz); i++) { s += f[i]; c++ } return Math.max(-100, s / c) })
+        smooth.current = smooth.current.map((v, i) => v * 0.8 + raw[i] * 0.2)
+        const t = new Float32Array(e.an.fftSize); e.an.getFloatTimeDomainData(t)
+        let pk = 0; for (const x of t) pk = Math.max(pk, Math.abs(x))
+        const l = new Float32Array(2048), r = new Float32Array(2048); e.anL.getFloatTimeDomainData(l); e.anR.getFloatTimeDomainData(r)
+        let lr = 0, ll = 0, rr = 0; for (let i = 0; i < 2048; i++) { lr += l[i] * r[i]; ll += l[i] * l[i]; rr += r[i] * r[i] }
+        setMeters({ bands: [...smooth.current], peak: db(pk), corr: ll && rr ? lr / Math.sqrt(ll * rr) : 0 })
       }
+      id = requestAnimationFrame(tick)
     }
+    id = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(id)
+  }, [])
 
-    setFreqBars([
-      Math.max(8, (dataArray[2] / 255) * 100),
-      Math.max(8, (dataArray[6] / 255) * 100),
-      Math.max(8, (dataArray[16] / 255) * 100),
-      Math.max(8, (dataArray[45] / 255) * 100),
-      Math.max(8, (dataArray[90] / 255) * 100),
-    ]);
+  useEffect(() => {
+    let t
+    const f = () => { clearTimeout(t); t = setTimeout(() => setVw(window.innerWidth), 120) }
+    window.addEventListener('resize', f)
+    return () => { window.removeEventListener('resize', f); clearTimeout(t) }
+  }, [])
 
-    animRef.current = requestAnimationFrame(() => updateVisualizer(trackDur));
-  };
+  /* ----- waveform ----- */
+  useEffect(() => {
+    const c = canvas.current
+    if (!c || tab !== 1) return
+    const g = c.getContext('2d'), W = (c.width = c.clientWidth * 2), H = (c.height = 120)
+    g.clearRect(0, 0, W, H); g.fillStyle = THEMES[theme].acc
+    const p = cur?.peaks || []
+    p.forEach((v, i) => { const h = Math.max(2, v * H * 0.95), x = (i / p.length) * W; g.fillRect(x, (H - h) / 2, Math.max(1, W / p.length - 1), h) })
+  }, [cur, theme, tab, vw])
 
-  const seekTo = (newTime) => {
-    const clamped = Math.max(0, Math.min(duration || 0, newTime));
-    setCurrentTime(clamped);
-    offsetRef.current = clamped;
-    if (isPlaying) playFromOffset(activeTrack, clamped);
-  };
+  /* ----- aksi lain ----- */
+  const addNote = () => {
+    if (!noteText.trim()) return
+    setNotes(n => [...n, { t: pos, text: noteText.trim() }].sort((a, b) => a.t - b.t)); setNoteText('')
+  }
+  const copyReport = async () => {
+    const body = notes.map(n => `[${fmt(n.t)}] ${n.text}`).join('\n')
+    const txt = `*Catatan Mix — ${files.A?.name || 'Mix Band'}*\n${body}`
+    try { await navigator.clipboard.writeText(txt); flash('Laporan disalin, tinggal tempel di WA') } catch { flash('Gagal menyalin') }
+  }
+  const cutPromo = () => {
+    const f = files[active]; if (!f) return flash('Unggah audio dulu')
+    const b = f.buf, sr = b.sampleRate
+    const st = Math.floor(Math.min(promoStart ?? (loopOk(loop) ? loop.a : pos), b.duration - 0.1) * sr)
+    const n = Math.min(Math.round(promoLen * sr), b.length - st), fi = Math.floor(0.04 * sr), fo = Math.min(Math.floor(0.8 * sr), n)
+    if (n <= 0) return flash('Durasi tidak valid')
+    const chs = Array.from({ length: b.numberOfChannels }, (_, c) => {
+      const out = b.getChannelData(c).slice(st, st + n)
+      for (let i = 0; i < fi && i < n; i++) out[i] *= i / fi
+      for (let i = 0; i < fo && i < n; i++) out[n - 1 - i] *= i / fo
+      return out
+    })
+    download(encodeWav(chs, sr), `promo-${promoLen}s-dari-${fmt(st / sr).replace(':', 'm')}.wav`)
+  }
+  const splitLR = () => {
+    const b = files.A?.buf; if (!b) return flash('Unggah Track A dulu')
+    if (b.numberOfChannels < 2) return flash('File ini mono, tidak bisa dipisah L/R')
+    const base = files.A.name.replace(/\.[^.]+$/, '')
+    download(encodeWav([b.getChannelData(0)], b.sampleRate), `${base}-L.wav`)
+    setTimeout(() => download(encodeWav([b.getChannelData(1)], b.sampleRate), `${base}-R.wav`), 400)
+  }
+  const toggleCheck = i => setChecks(c => {
+    const n = c.includes(i) ? c.filter(x => x !== i) : [...c, i]
+    try { localStorage.setItem('cmb-checks', JSON.stringify(n)) } catch { /* abaikan */ }
+    return n
+  })
 
-  const switchTrack = (track) => {
-    const nowOffset = isPlaying ? ((audioCtxRef.current.currentTime - startTimeRef.current) % (duration || 1)) : offsetRef.current;
-    offsetRef.current = nowOffset;
-    setActiveTrack(track);
-    const buf = track === 'A' ? bufferARef.current : bufferBRef.current;
-    if (buf) setDuration(buf.duration);
-    if (isPlaying) playFromOffset(track, nowOffset);
-  };
-
-  // Add Timestamped Note
-  const addNote = (e) => {
-    e.preventDefault();
-    if (!noteInput.trim()) return;
-    const newNote = {
-      id: Date.now(),
-      time: currentTime,
-      track: activeTrack,
-      text: noteInput.trim()
-    };
-    setNotes([newNote, ...notes]);
-    setNoteInput('');
-  };
-
-  const copyNotesToClipboard = () => {
-    if (notes.length === 0) return;
-    const header = `Catatan Revisi Mix - ${bandName} (${trackAName}):\n`;
-    const body = notes.map(n => `- [${formatTime(n.time)}] (Track ${n.track}): ${n.text}`).join('\n');
-    navigator.clipboard.writeText(header + body);
-    setCopiedNotes(true);
-    setTimeout(() => setCopiedNotes(false), 2000);
-  };
-
-  // Export WAV Snippet for TikTok/Reels
-  const exportWavSnippet = () => {
-    const buf = bufferARef.current;
-    if (!buf) {
-      alert('Unggah dulu file Mix Band di Track A!');
-      return;
-    }
-    setIsExporting(true);
-    setTimeout(() => {
-      const sampleRate = buf.sampleRate;
-      const startSample = Math.floor(snippetStart * sampleRate);
-      const endSample = Math.min(buf.length, Math.floor((snippetStart + snippetLen) * sampleRate));
-      const frameCount = endSample - startSample;
-      if (frameCount <= 0) {
-        setIsExporting(false);
-        return;
-      }
-
-      const numChannels = buf.numberOfChannels;
-      const bytesPerSample = 2;
-      const blockAlign = numChannels * bytesPerSample;
-      const dataSize = frameCount * blockAlign;
-      const wavBuffer = new ArrayBuffer(44 + dataSize);
-      const view = new DataView(wavBuffer);
-
-      const writeStr = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
-      writeStr(0, 'RIFF');
-      view.setUint32(4, 36 + dataSize, true);
-      writeStr(8, 'WAVE');
-      writeStr(12, 'fmt ');
-      view.setUint32(16, 16, true);
-      view.setUint16(20, 1, true);
-      view.setUint16(22, numChannels, true);
-      view.setUint32(24, sampleRate, true);
-      view.setUint32(28, sampleRate * blockAlign, true);
-      view.setUint16(32, blockAlign, true);
-      view.setUint16(34, 16, true);
-      writeStr(36, 'data');
-      view.setUint32(40, dataSize, true);
-
-      let offset = 44;
-      for (let i = 0; i < frameCount; i++) {
-        for (let ch = 0; ch < numChannels; ch++) {
-          let sample = buf.getChannelData(ch)[startSample + i] || 0;
-          sample = Math.max(-1, Math.min(1, sample));
-          view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
-          offset += 2;
-        }
-      }
-
-      const blob = new Blob([wavBuffer], { type: 'audio/wav' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${bandName.replace(/\s+/g, '_')}_Snippet_${snippetLen}s.wav`;
-      a.click();
-      URL.revokeObjectURL(url);
-      setIsExporting(false);
-    }, 100);
-  };
-
-  const formatTime = (sec) => {
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m}:${s < 10 ? '0' : ''}${s}`;
-  };
-
-  const getAdvisorMessage = () => {
-    if (peakDb > -0.5) return { warn: true, text: 'Peringatan Clipping! Sinyal melewati -0.5 dB. Turunkan Limiter atau Volume Master.' };
-    if (correlation < 0.15 && isPlaying) return { warn: true, text: 'Peringatan Fase Stereo! Korelasi mendekati 0/negatif—gitar/synth berisiko hilang di speaker Mono.' };
-    if (channelMode === 'side') return { warn: false, text: 'Monitor SIDE Aktif: Hanya menampilkan perbedaan kiri-kanan (reverb & gitar ganda).' };
-    if (channelMode === 'mid') return { warn: false, text: 'Monitor MID Aktif: Hanya menampilkan vokal utama, bass, kick, dan snare di tengah.' };
-    if (freqBars[2] > freqBars[3] + 18) return { warn: true, text: 'Area Low-Mid (250-500 Hz) cukup padat. Cek apakah suara mix terdengar mendem.' };
-    return { warn: false, text: 'Spektrum, fase stereo, dan headroom terpantau aman untuk standar streaming.' };
-  };
-
-  const advisor = getAdvisorMessage();
-  const activeWaveform = activeTrack === 'A' ? waveA : waveB;
-  const activeColor = activeTrack === 'A' ? '#38bdf8' : '#c084fc';
-
-  const cardStyle = {
-    background: 'linear-gradient(145deg, rgba(30,41,59,0.88), rgba(15,23,42,0.96))',
-    border: '1px solid rgba(148,163,184,0.15)',
-    borderRadius: '16px',
-    padding: '16px',
-    boxShadow: '0 8px 24px rgba(0,0,0,0.25)'
-  };
+  /* ----- render ----- */
+  const T = THEMES[theme]
+  const mean = meters.bands.reduce((a, b) => a + b, 0) / 5
+  const pct = v => Math.max(0, Math.min(100, ((v + 100) / 100) * 100))
+  const semis = 12 * Math.log2(rate)
 
   return (
-    <div style={{ background: 'radial-gradient(circle at top, #1e1b4b 0%, #090d16 65%)', color: '#f8fafc', minHeight: '100vh', padding: '18px', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
-      <div style={{ maxWidth: '820px', margin: '0 auto' }}>
-        
-        {/* Header & Mode Switcher */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '12px' }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Activity color="#38bdf8" size={24} />
-              {isEditingName ? (
-                <input
-                  value={bandName}
-                  onChange={(e) => { setBandName(e.target.value); localStorage.setItem('bandName', e.target.value); }}
-                  onBlur={() => setIsEditingName(false)}
-                  autoFocus
-                  style={{ background: '#1e293b', color: '#fff', border: '1px solid #38bdf8', borderRadius: '6px', padding: '4px 8px', fontSize: '18px', fontWeight: 'bold' }}
-                />
-              ) : (
-                <h1 onClick={() => setIsEditingName(true)} style={{ fontSize: '21px', fontWeight: '800', margin: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  {bandName} <Edit3 size={14} color="#64748b" />
-                </h1>
-              )}
-            </div>
-            <p style={{ color: '#94a3b8', fontSize: '12px', margin: '2px 0 0 0' }}>DIY Studio & Stage Console v3.0</p>
-          </div>
-
-          <div style={{ display: 'flex', backgroundColor: '#0f172a', padding: '4px', borderRadius: '12px', border: '1px solid #334155' }}>
-            <button
-              onClick={() => setActiveTab('studio')}
-              style={{ backgroundColor: activeTab === 'studio' ? '#0284c7' : 'transparent', color: '#fff', border: 'none', padding: '8px 14px', borderRadius: '9px', cursor: 'pointer', fontWeight: '700', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
-            >
-              <Sliders size={14} /> Studio Mix & Master
-            </button>
-            <button
-              onClick={() => setActiveTab('stage')}
-              style={{ backgroundColor: activeTab === 'stage' ? '#9333ea' : 'transparent', color: '#fff', border: 'none', padding: '8px 14px', borderRadius: '9px', cursor: 'pointer', fontWeight: '700', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
-            >
-              <Radio size={14} /> Stage, Promo & Checklist
-            </button>
-          </div>
+    <div className="app" style={{ '--bg': T.bg, '--panel': T.panel, '--line': T.line, '--text': T.text, '--mute': T.mute, '--acc': T.acc }}>
+      <style>{CSS}</style>
+      <header>
+        <div className="brand">
+          <span className={`logo${playing ? ' live' : ''}`}><i /><i /><i /></span>
+          <div><h1>DIY Studio &amp; Stage Console</h1><small>v4.1 · cek mix band</small></div>
         </div>
+        <Seg value={theme} onChange={setTheme} options={Object.entries(THEMES).map(([k, v]) => [k, v.n])} />
+      </header>
+      <nav><button className={tab === 1 ? 'on' : ''} onClick={() => setTab(1)}>Mix &amp; Referensi</button>
+        <button className={tab === 2 ? 'on' : ''} onClick={() => setTab(2)}>Promo, Live &amp; Rilis</button></nav>
+      {msg && <div className="toast">{msg}</div>}
 
-        {/* Upload & Gain Matching (Always Visible) */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '12px', marginBottom: '14px' }}>
-          {[
-            { id: 'A', title: 'TRACK A • Mix Band', name: trackAName, color: '#38bdf8', gain: gainA, setGain: setGainA },
-            { id: 'B', title: 'TRACK B • Lagu Referensi', name: trackBName, color: '#c084fc', gain: gainB, setGain: setGainB }
-          ].map((t) => (
-            <div key={t.id} style={{ ...cardStyle, border: activeTrack === t.id ? `1.5px solid ${t.color}` : '1px solid rgba(148,163,184,0.15)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                <span style={{ fontWeight: '700', fontSize: '12px', color: t.color }}>{t.title}</span>
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', backgroundColor: '#334155', padding: '5px 10px', borderRadius: '8px', cursor: 'pointer', fontSize: '11px', fontWeight: '600' }}>
-                  <Upload size={12} /> Pilih WAV/MP3
-                  <input type="file" accept="audio/*" onChange={(e) => handleFileUpload(e, t.id)} style={{ display: 'none' }} />
-                </label>
-              </div>
-              <div style={{ fontSize: '12px', color: '#cbd5e1', marginBottom: '10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: '#94a3b8' }}>
-                <span>Gain:</span>
-                <input type="range" min="0.1" max="1.5" step="0.05" value={t.gain} onChange={(e) => t.setGain(parseFloat(e.target.value))} style={{ flex: 1, accentColor: t.color }} />
-                <span style={{ width: '34px', textAlign: 'right' }}>{Math.round(t.gain * 100)}%</span>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Transport, Interactive Waveform & A-B Loop */}
-        <div style={{ ...cardStyle, marginBottom: '14px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '12px' }}>
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <button onClick={togglePlay} style={{ background: isPlaying ? 'linear-gradient(90deg, #ef4444, #dc2626)' : 'linear-gradient(90deg, #10b981, #059669)', color: '#fff', border: 'none', padding: '9px 18px', borderRadius: '10px', fontWeight: '700', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px' }}>
-                {isPlaying ? <><Pause size={15} /> Pause</> : <><Play size={15} /> Play</>}
-              </button>
-
-              <div style={{ display: 'flex', gap: '4px', backgroundColor: '#0f172a', padding: '4px', borderRadius: '10px' }}>
-                <button onClick={() => switchTrack('A')} style={{ backgroundColor: activeTrack === 'A' ? '#0284c7' : 'transparent', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '7px', cursor: 'pointer', fontWeight: '700', fontSize: '12px' }}>
-                  Track A
-                </button>
-                <button onClick={() => switchTrack('B')} style={{ backgroundColor: activeTrack === 'B' ? '#9333ea' : 'transparent', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '7px', cursor: 'pointer', fontWeight: '700', fontSize: '12px' }}>
-                  Track B
-                </button>
-              </div>
-            </div>
-
-            {/* A-B Section Loop Controls */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#0f172a', padding: '5px 8px', borderRadius: '10px', border: '1px solid #334155' }}>
-              <Repeat size={13} color={isLoopActive ? '#f59e0b' : '#64748b'} />
-              <button onClick={() => setLoopA(currentTime)} style={{ backgroundColor: '#1e293b', color: '#cbd5e1', border: 'none', padding: '4px 8px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer' }}>
-                Set A {loopA !== null ? `(${formatTime(loopA)})` : ''}
-              </button>
-              <button onClick={() => setLoopB(currentTime)} style={{ backgroundColor: '#1e293b', color: '#cbd5e1', border: 'none', padding: '4px 8px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer' }}>
-                Set B {loopB !== null ? `(${formatTime(loopB)})` : ''}
-              </button>
-              <button
-                onClick={() => setIsLoopActive(!isLoopActive)}
-                disabled={loopA === null || loopB === null}
-                style={{ backgroundColor: isLoopActive ? '#f59e0b' : '#334155', color: isLoopActive ? '#000' : '#fff', border: 'none', padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '700', cursor: 'pointer', opacity: (loopA === null || loopB === null) ? 0.5 : 1 }}
-              >
-                {isLoopActive ? 'Loop ON' : 'Loop OFF'}
-              </button>
-            </div>
+      {tab === 1 && <main>
+        <Card title="Pemutar A/B" wide>
+          <div className="slots">
+            {['A', 'B'].map(x => (
+              <div key={x} className={`slot${active === x ? ' act' : ''}`}>
+                <button className="sw" onClick={() => switchTrack(x)} disabled={!files[x]}><i className="led" />Track {x} · {x === 'A' ? 'Mix Band' : 'Referensi'}</button>
+                <label className="up"><Upload size={14} /> {files[x]?.name || 'Pilih file audio'}
+                  <input type="file" accept="audio/*" hidden onChange={e => load(x, e.target.files[0])} /></label>
+                {files[x] && <small>{files[x].bpm ?? '—'} BPM · ≈{files[x].lufs.toFixed(1)} LUFS</small>}
+                <Slider label="Gain" value={vol[x]} onChange={v => setVol(o => ({ ...o, [x]: v }))} show={`${Math.round(vol[x] * 100)}%`} />
+              </div>))}
           </div>
-
-          {/* Interactive Waveform Display */}
-          <div
-            onClick={(e) => {
-              if (!duration) return;
-              const rect = e.currentTarget.getBoundingClientRect();
-              const ratio = (e.clientX - rect.left) / rect.width;
-              seekTo(ratio * duration);
-            }}
-            style={{ height: '54px', backgroundColor: '#090d16', borderRadius: '10px', padding: '6px 8px', display: 'flex', alignItems: 'center', gap: '2px', cursor: 'pointer', position: 'relative', overflow: 'hidden' }}
-          >
-            {activeWaveform.map((val, idx) => {
-              const pct = (idx / activeWaveform.length) * 100;
-              const playPct = duration ? (currentTime / duration) * 100 : 0;
-              const passed = pct <= playPct;
-              return (
-                <div
-                  key={idx}
-                  style={{
-                    flex: 1,
-                    height: `${val}%`,
-                    backgroundColor: passed ? activeColor : '#334155',
-                    borderRadius: '2px',
-                    transition: 'background-color 0.1s'
-                  }}
-                />
-              );
-            })}
+          <div className="wave" ref={seekEl} onClick={e => { if (!dur) return; const r = e.currentTarget.getBoundingClientRect(); seek(((e.clientX - r.left) / r.width) * dur) }}>
+            <canvas ref={canvas} />
+            {loopOk(loop) && <i className="lp" style={{ left: `${(loop.a / dur) * 100}%`, width: `${((loop.b - loop.a) / dur) * 100}%`, opacity: loop.on ? 1 : 0.4 }} />}
+            {dur > 0 && <i className="pl" style={{ width: `${(pos / dur) * 100}%` }} />}
+            {dur > 0 && <i className="ph" style={{ left: `${(pos / dur) * 100}%` }} />}
           </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#94a3b8', marginTop: '6px' }}>
-            <span>{formatTime(currentTime)}</span>
-            <span>Klik grafik gelombang untuk melompat ke bagian lagu</span>
-            <span>{formatTime(duration)}</span>
+          <div className="row">
+            <button className="primary play" onClick={togglePlay}>{playing ? <Pause size={16} /> : <Play size={16} />}{playing ? 'Jeda' : 'Putar'}</button>
+            <span className="time">{fmt(pos)} / {fmt(dur)}</span>
+            <button onClick={() => changeLoop({ ...loop, a: pos })}>Set A</button>
+            <button onClick={() => changeLoop({ ...loop, b: pos })}>Set B</button>
+            <button className={loop.on ? 'on' : ''} disabled={!loopOk(loop)} onClick={() => changeLoop({ ...loop, on: !loop.on })}><Repeat size={14} /> Loop {loop.on ? 'ON' : 'OFF'}</button>
+            {loop.a != null && <small>A {fmt(loop.a)}{loop.b != null && ` – B ${fmt(loop.b)}`}</small>}
           </div>
-        </div>
+          <Slider label="Pitch & Speed" min={0.75} max={1.25} step={0.01} value={rate} onChange={changeRate}
+            show={`${rate.toFixed(2)}× (${semis >= 0 ? '+' : ''}${semis.toFixed(1)} st)`} />
+          <small className="hint">Pitch dan kecepatan berubah bersamaan, seperti memutar kaset.</small>
+        </Card>
 
-        {/* TAB 1: STUDIO MIX & MASTER */}
-        {activeTab === 'studio' && (
-          <>
-            {/* Spectrum, Peak & Stereo Correlation */}
-            <div style={{ display: 'grid', gridTemplateColumns: '2.5fr 1fr', gap: '12px', marginBottom: '14px' }}>
-              <div style={cardStyle}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                  <span style={{ fontSize: '12px', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase' }}>Spektrum & Isolasi Frekuensi</span>
-                  <div style={{ display: 'flex', gap: '4px' }}>
-                    {[
-                      { id: 'all', label: 'All' },
-                      { id: 'low', label: 'Solo Low' },
-                      { id: 'mid', label: 'Solo Mid' },
-                      { id: 'high', label: 'Solo High' }
-                    ].map(f => (
-                      <button
-                        key={f.id}
-                        onClick={() => setFreqSolo(f.id)}
-                        style={{ backgroundColor: freqSolo === f.id ? '#0ea5e9' : '#1e293b', color: '#fff', border: '1px solid #334155', padding: '3px 8px', borderRadius: '6px', fontSize: '10px', fontWeight: '700', cursor: 'pointer' }}
-                      >
-                        {f.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-around', height: '105px', backgroundColor: '#090d16', padding: '10px', borderRadius: '10px', marginBottom: '10px' }}>
-                  {['Sub', 'Bass', 'Low-Mid', 'High-Mid', 'Treble'].map((label, i) => (
-                    <div key={label} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '18%' }}>
-                      <div style={{ width: '46%', height: `${freqBars[i]}px`, background: activeTrack === 'A' ? 'linear-gradient(180deg, #38bdf8, #0284c7)' : 'linear-gradient(180deg, #e879f9, #9333ea)', borderRadius: '4px 4px 0 0', transition: 'height 0.07s' }} />
-                      <span style={{ fontSize: '10px', color: '#94a3b8', marginTop: '5px' }}>{label}</span>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Stereo Phase Correlation Meter */}
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#94a3b8', marginBottom: '4px' }}>
-                    <span>-1 (Fase Terbalik)</span>
-                    <span style={{ fontWeight: '700', color: correlation < 0.2 ? '#ef4444' : '#10b981' }}>Stereo Correlation: {correlation.toFixed(2)}</span>
-                    <span>+1 (Mono/Aman)</span>
-                  </div>
-                  <div style={{ height: '8px', backgroundColor: '#090d16', borderRadius: '4px', position: 'relative', overflow: 'hidden' }}>
-                    <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, width: '1px', backgroundColor: '#475569' }} />
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        bottom: 0,
-                        width: '12px',
-                        borderRadius: '4px',
-                        backgroundColor: correlation < 0.2 ? '#ef4444' : '#10b981',
-                        left: `calc(${((correlation + 1) / 2) * 100}% - 6px)`,
-                        transition: 'left 0.1s'
-                      }}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Peak dB Meter */}
-              <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ fontSize: '11px', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase' }}>Peak Level</div>
-                <div style={{ width: '32px', height: '115px', backgroundColor: '#090d16', borderRadius: '8px', padding: '3px', display: 'flex', alignItems: 'flex-end' }}>
-                  <div style={{ width: '100%', height: `${Math.max(5, ((peakDb + 60) / 60) * 100)}%`, backgroundColor: peakDb > -1 ? '#ef4444' : peakDb > -6 ? '#f59e0b' : '#10b981', borderRadius: '5px', transition: 'height 0.07s' }} />
-                </div>
-                <div style={{ fontSize: '13px', fontWeight: '800', color: peakDb > -1 ? '#ef4444' : '#f8fafc' }}>{peakDb.toFixed(1)} dB</div>
-              </div>
-            </div>
-
-            {/* Simulasi Perangkat & Mid/Side/Mono Monitor */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '12px', marginBottom: '14px' }}>
-              <div style={cardStyle}>
-                <div style={{ fontSize: '12px', fontWeight: '700', marginBottom: '10px', color: '#94a3b8', textTransform: 'uppercase' }}>Simulasi Perangkat & Streaming</div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-                  {[
-                    { id: 'studio', label: 'Studio Flat', icon: <Headphones size={13} /> },
-                    { id: 'spotify', label: 'Spotify -14 LUFS', icon: <Volume2 size={13} /> },
-                    { id: 'phone', label: 'Speaker HP', icon: <Smartphone size={13} /> },
-                    { id: 'car', label: 'Audio Mobil', icon: <Car size={13} /> },
-                    { id: 'club', label: 'Sound Panggung', icon: <Speaker size={13} /> }
-                  ].map((d) => (
-                    <button key={d.id} onClick={() => setDeviceMode(d.id)} style={{ backgroundColor: deviceMode === d.id ? '#0284c7' : '#1e293b', color: '#fff', border: '1px solid #334155', padding: '8px', borderRadius: '8px', cursor: 'pointer', fontSize: '11px', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      {d.icon} {d.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div style={cardStyle}>
-                <div style={{ fontSize: '12px', fontWeight: '700', marginBottom: '10px', color: '#94a3b8', textTransform: 'uppercase' }}>Monitor Kanal (Mono & Mid/Side)</div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-                  {[
-                    { id: 'stereo', label: 'STEREO (Normal)' },
-                    { id: 'mono', label: 'MONO (Cek Fase)' },
-                    { id: 'mid', label: 'MID (Vokal/Bass)' },
-                    { id: 'side', label: 'SIDE (Gitar/Reverb)' }
-                  ].map((m) => (
-                    <button
-                      key={m.id}
-                      onClick={() => setChannelMode(m.id)}
-                      style={{ backgroundColor: channelMode === m.id ? '#f59e0b' : '#1e293b', color: channelMode === m.id ? '#000' : '#fff', border: '1px solid #334155', padding: '9px 8px', borderRadius: '8px', cursor: 'pointer', fontSize: '11px', fontWeight: '700' }}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* Smart Mix Advisor */}
-            <div style={{ ...cardStyle, marginBottom: '14px', borderLeft: advisor.warn ? '4px solid #f59e0b' : '4px solid #10b981', display: 'flex', alignItems: 'center', gap: '10px' }}>
-              {advisor.warn ? <AlertTriangle color="#f59e0b" size={20} /> : <CheckCircle2 color="#10b981" size={20} />}
-              <div style={{ fontSize: '12px', color: '#e2e8f0' }}>{advisor.text}</div>
-            </div>
-
-            {/* Timestamped Mix Notes */}
-            <div style={cardStyle}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                <span style={{ fontSize: '12px', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase' }}>Catatan Revisi Per Detik Lagu</span>
-                {notes.length > 0 && (
-                  <button onClick={copyNotesToClipboard} style={{ backgroundColor: '#334155', color: '#fff', border: 'none', padding: '5px 10px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }}>
-                    {copiedNotes ? <><Check size={12} color="#10b981" /> Tersalin ke Clipboard!</> : <><Copy size={12} /> Salin Laporan WA</>}
-                  </button>
-                )}
-              </div>
-
-              <form onSubmit={addNote} style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-                <div style={{ backgroundColor: '#0f172a', padding: '8px 10px', borderRadius: '8px', fontSize: '12px', fontWeight: '700', color: '#38bdf8', border: '1px solid #334155' }}>
-                  {formatTime(currentTime)}
-                </div>
-                <input
-                  value={noteInput}
-                  onChange={(e) => setNoteInput(e.target.value)}
-                  placeholder="Tulis catatan revisi di detik ini (misal: Vokal kurang naik)..."
-                  style={{ flex: 1, backgroundColor: '#0f172a', color: '#fff', border: '1px solid #334155', borderRadius: '8px', padding: '8px 12px', fontSize: '12px' }}
-                />
-                <button type="submit" style={{ backgroundColor: '#0284c7', color: '#fff', border: 'none', padding: '8px 14px', borderRadius: '8px', fontWeight: '700', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }}>
-                  <MessageSquarePlus size={14} /> Tandai
-                </button>
-              </form>
-
-              {notes.length === 0 ? (
-                <div style={{ fontSize: '12px', color: '#64748b', textAlign: 'center', padding: '10px' }}>Belum ada catatan revisi. Putar lagu dan tandai detik yang perlu diperbaiki.</div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '160px', overflowY: 'auto' }}>
-                  {notes.map((n) => (
-                    <div key={n.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#0f172a', padding: '8px 12px', borderRadius: '8px', fontSize: '12px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <button onClick={() => seekTo(n.time)} style={{ backgroundColor: '#1e293b', color: '#38bdf8', border: 'none', padding: '3px 7px', borderRadius: '5px', fontWeight: '700', cursor: 'pointer', fontSize: '11px' }}>
-                          {formatTime(n.time)}
-                        </button>
-                        <span style={{ color: '#94a3b8', fontSize: '11px' }}>[Track {n.track}]</span>
-                        <span>{n.text}</span>
-                      </div>
-                      <button onClick={() => setNotes(notes.filter(item => item.id !== n.id))} style={{ background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer' }}>
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </>
-        )}
-
-        {/* TAB 2: STAGE, PROMO & RELEASE CHECKLIST */}
-        {activeTab === 'stage' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-            
-            {/* Quick TikTok / Reels Snippet Exporter */}
-            <div style={cardStyle}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                <Scissors size={16} color="#38bdf8" />
-                <span style={{ fontSize: '13px', fontWeight: '700', textTransform: 'uppercase' }}>Pemotong Audio Promo TikTok / Reels (Track A)</span>
-              </div>
-              <p style={{ fontSize: '12px', color: '#94a3b8', margin: '0 0 12px 0' }}>
-                Potong bagian reff paling catchy dari Track A untuk dijadikan file WAV pendek siap unggah ke media sosial.
-              </p>
-
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center' }}>
-                <button onClick={() => setSnippetStart(currentTime)} style={{ backgroundColor: '#334155', color: '#fff', border: 'none', padding: '8px 12px', borderRadius: '8px', fontSize: '12px', cursor: 'pointer' }}>
-                  Mulai dari Detik Saat Ini ({formatTime(snippetStart)})
-                </button>
-
-                <select value={snippetLen} onChange={(e) => setSnippetLen(Number(e.target.value))} style={{ backgroundColor: '#0f172a', color: '#fff', border: '1px solid #334155', padding: '8px 12px', borderRadius: '8px', fontSize: '12px' }}>
-                  <option value={15}>Durasi: 15 Detik (Story/TikTok)</option>
-                  <option value={30}>Durasi: 30 Detik (Reels/Chorus)</option>
-                  <option value={60}>Durasi: 60 Detik (Full Teaser)</option>
-                </select>
-
-                <button onClick={exportWavSnippet} disabled={isExporting} style={{ backgroundColor: '#10b981', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '8px', fontWeight: '700', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <Download size={14} /> {isExporting ? 'Memproses...' : 'Unduh Potongan WAV'}
-                </button>
-              </div>
-            </div>
-
-            {/* Live Stage Backing Track & Click Splitter */}
-            <div style={cardStyle}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                <Layers size={16} color="#c084fc" />
-                <span style={{ fontSize: '13px', fontWeight: '700', textTransform: 'uppercase' }}>Live Backing Track & Click Splitter</span>
-              </div>
-              <p style={{ fontSize: '12px', color: '#94a3b8', margin: '0 0 12px 0' }}>
-                Gunakan saat latihan atau manggung: arahkan sinyal musik ke Kiri (FOH) dan metronom/click ke Kanan (Headphone Drummer).
-              </p>
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                {[
-                  { val: -1, label: 'Kiri Penuh (L - Sound Panggung)' },
-                  { val: 0, label: 'Tengah (Stereo Normal)' },
-                  { val: 1, label: 'Kanan Penuh (R - In-Ear Drummer)' }
-                ].map(p => (
-                  <button
-                    key={p.val}
-                    onClick={() => setStagePan(p.val)}
-                    style={{ backgroundColor: stagePan === p.val ? '#9333ea' : '#1e293b', color: '#fff', border: '1px solid #334155', padding: '8px 12px', borderRadius: '8px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}
-                  >
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Pre-Release Mastering Checklist */}
-            <div style={cardStyle}>
-              <div style={{ fontSize: '13px', fontWeight: '700', textTransform: 'uppercase', marginBottom: '10px', color: '#38bdf8' }}>
-                Checklist Sebelum Upload ke SoundOn / Spotify
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {checklist.map(item => (
-                  <div
-                    key={item.id}
-                    onClick={() => setChecklist(checklist.map(c => c.id === item.id ? { ...c, done: !c.done } : c))}
-                    style={{ display: 'flex', alignItems: 'center', gap: '10px', backgroundColor: '#0f172a', padding: '10px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', color: item.done ? '#64748b' : '#f8fafc', textDecoration: item.done ? 'line-through' : 'none' }}
-                  >
-                    {item.done ? <CheckSquare size={16} color="#10b981" /> : <Square size={16} color="#64748b" />}
-                    <span>{item.text}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
+        <Card title="Spektrum & Meter" wide>
+          <div className="spec">
+            {BANDS.map(([n], i) => (
+              <div key={n} className="bar"><div className="fill" style={{ clipPath: `inset(${100 - pct(meters.bands[i])}% 0 0 0)` }} />
+                {punk && <i className="tgt" style={{ bottom: `${pct(mean + PUNK_TARGET[i])}%` }} />}<span>{n}</span></div>))}
           </div>
-        )}
+          <label className="chk"><input type="checkbox" checked={punk} onChange={e => setPunk(e.target.checked)} /> Tampilkan kurva target Punk / Alt-Rock (garis penanda)</label>
+          <div className="row">
+            <div className="meter"><span>Peak</span><b className={meters.peak > -1 ? 'warn' : ''}>{meters.peak > -119 ? meters.peak.toFixed(1) : '−∞'} dB</b></div>
+            <div className="meter grow"><span>Korelasi stereo</span>
+              <div className="corr"><i style={{ left: `${(meters.corr + 1) * 50}%` }} /></div>
+              <b>{meters.corr.toFixed(2)}</b></div>
+          </div>
+        </Card>
 
-      </div>
+        <Card title="Monitoring">
+          <p className="lbl">Simulasi perangkat</p>
+          <Seg value={device} onChange={setDevice} options={Object.entries(DEVICES).map(([k, v]) => [k, v.n])} />
+          <p className="lbl">Isolasi band</p>
+          <Seg value={solo} onChange={setSolo} options={[['off', 'Off'], ['low', 'Solo Low'], ['mid', 'Solo Mid'], ['high', 'Solo High']]} />
+          <p className="lbl">Kanal</p>
+          <Seg value={ch} onChange={setCh} options={[['stereo', 'Stereo'], ['mono', 'Mono / Mid'], ['side', 'Solo Side']]} />
+          <label className="chk"><input type="checkbox" checked={vocalRm} onChange={e => setVocalRm(e.target.checked)} /> Vocal Remover (center cancel; bass &amp; kick ikut berkurang)</label>
+          <label className="chk"><input type="checkbox" checked={spot} onChange={e => setSpot(e.target.checked)} /> Normalisasi Spotify −14 LUFS (estimasi)</label>
+        </Card>
+
+        <Card title="Mastering EQ · Track A">
+          {['Low', 'Mid', 'High'].map((n, i) => (
+            <Slider key={n} label={n} min={-6} max={6} step={0.5} value={eqv[i]} onChange={v => setEqv(e => e.map((x, j) => (j === i ? v : x)))} show={`${eqv[i] > 0 ? '+' : ''}${eqv[i]} dB`} />))}
+          <button onClick={() => setEqv([0, 0, 0])}>Reset EQ</button>
+        </Card>
+
+        <Card title="Simulasi Kebisingan">
+          <Seg value={noise.mode} onChange={m => setNoise(n => ({ ...n, mode: m }))} options={[['off', 'Off'], ['cafe', 'Kafe'], ['street', 'Jalanan']]} />
+          <Slider label="Level" value={noise.level} onChange={v => setNoise(n => ({ ...n, level: v }))} show={`${Math.round(noise.level * 100)}%`} />
+        </Card>
+
+        <Card title="Catatan Revisi" wide>
+          <div className="row">
+            <input className="txt" value={noteText} placeholder={`Catatan di ${fmt(pos)}…`} onChange={e => setNoteText(e.target.value)} onKeyDown={e => e.key === 'Enter' && addNote()} />
+            <button className="primary" onClick={addNote}><StickyNote size={14} /> Tambah</button>
+            <button onClick={copyReport} disabled={!notes.length}><Copy size={14} /> Salin Laporan WA</button>
+          </div>
+          {!notes.length && <small className="hint">Belum ada catatan. Putar lagu, lalu tulis temuan di titik waktunya.</small>}
+          <ul className="notes">{notes.map((n, i) => (
+            <li key={i}><button onClick={() => seek(n.t)}>{fmt(n.t)}</button><span>{n.text}</span>
+              <button aria-label="Hapus catatan" onClick={() => setNotes(x => x.filter((_, j) => j !== i))}><Trash2 size={13} /></button></li>))}</ul>
+        </Card>
+      </main>}
+
+      {tab === 2 && <main>
+        <Card title="Potong Audio Promo">
+          <p className="lbl">Durasi</p>
+          <Seg value={promoLen} onChange={setPromoLen} options={[[15, '15 detik'], [30, '30 detik'], [60, '60 detik']]} />
+          <Slider label="Kustom" min={1} max={Math.max(5, Math.min(300, Math.floor(dur) || 60))} step={1} value={promoLen}
+            onChange={setPromoLen} show={`${promoLen} detik`} />
+          <p className="lbl">Mulai dari</p>
+          <div className="row">
+            <button className={promoStart == null ? 'on' : ''} onClick={() => setPromoStart(null)}>Otomatis</button>
+            <button onClick={() => setPromoStart(pos)}>Posisi sekarang ({fmt(pos)})</button>
+            <button disabled={loop.a == null} onClick={() => setPromoStart(loop.a)}>Loop A</button>
+            <button disabled={!loopOk(loop)} onClick={() => { setPromoStart(loop.a); setPromoLen(Math.max(1, Math.round(loop.b - loop.a))) }}>Pakai Loop A–B</button>
+          </div>
+          <Slider label="Titik mulai" min={0} max={Math.max(1, Math.floor(dur))} step={1} value={Math.floor(promoStart ?? 0)}
+            onChange={setPromoStart} show={promoStart == null ? 'otomatis' : fmt(promoStart)} />
+          <small className="hint">
+            Hasil: {fmt(promoStart ?? (loopOk(loop) ? loop.a : pos))} → {fmt(Math.min(dur, (promoStart ?? (loopOk(loop) ? loop.a : pos)) + promoLen))}.
+            Mode otomatis memakai Loop A, atau posisi putar jika Loop belum diatur. Fade-in 40 ms, fade-out 0,8 detik.
+          </small>
+          <button className="primary" onClick={cutPromo}><Scissors size={14} /> Potong &amp; unduh .wav</button>
+        </Card>
+        <Card title="Live Backing Track L/R">
+          <small className="hint">Pisahkan Track A stereo menjadi dua file mono: kiri (misal click/guide) dan kanan (misal backing) untuk dikirim ke mixer panggung.</small>
+          <button className="primary" onClick={splitLR}><Download size={14} /> Unduh L &amp; R</button>
+        </Card>
+        <Card title="Checklist Rilis SoundOn" wide>
+          <ul className="checks">{CHECKS.map((c, i) => (
+            <li key={i}><label><input type="checkbox" checked={checks.includes(i)} onChange={() => toggleCheck(i)} /> {c}</label></li>))}</ul>
+          <small className="hint">{checks.length} dari {CHECKS.length} selesai</small>
+        </Card>
+      </main>}
     </div>
-  );
+  )
 }
+
+/* ---------- Gaya ---------- */
+const CSS = `
+.app{min-height:100vh;color:var(--text);font:15px/1.5 "Segoe UI",system-ui,-apple-system,sans-serif;padding:20px 16px 56px;background:radial-gradient(900px 420px at 50% -140px,color-mix(in srgb,var(--acc) 24%,transparent),transparent),var(--bg)}
+.app *{box-sizing:border-box}
+header{display:flex;flex-wrap:wrap;gap:14px;justify-content:space-between;align-items:center;max-width:1100px;margin:0 auto 18px}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{display:flex;align-items:flex-end;gap:3px;width:38px;height:38px;padding:8px;border-radius:11px;background:var(--panel);border:1px solid var(--line);box-shadow:0 0 22px -2px color-mix(in srgb,var(--acc) 45%,transparent)}
+.logo i{flex:1;height:40%;background:var(--acc);border-radius:2px}
+.logo i:nth-child(2){height:90%}.logo i:nth-child(3){height:62%}
+.logo.live i{animation:eq .7s ease-in-out infinite alternate}
+.logo.live i:nth-child(2){animation-delay:.2s}.logo.live i:nth-child(3){animation-delay:.4s}
+@keyframes eq{to{height:96%}}
+h1{font-size:22px;line-height:1.1;margin:0;font-weight:700;letter-spacing:-.015em}
+header small{color:var(--mute)}
+h2{font-size:16px;margin:0;font-weight:650;letter-spacing:-.005em}
+nav{display:flex;gap:6px;max-width:1100px;margin:0 auto 18px;border-bottom:1px solid var(--line)}
+nav button{border:0;border-bottom:2px solid transparent;border-radius:8px 8px 0 0;margin-bottom:-1px;padding:10px 16px;color:var(--mute);background:transparent}
+nav button.on{background:transparent;color:var(--text);border-bottom-color:var(--acc);font-weight:600;box-shadow:none}
+main{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:16px;max-width:1100px;margin:0 auto}
+.card{display:flex;flex-direction:column;gap:12px;padding:18px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,color-mix(in srgb,var(--panel) 90%,#fff 10%),var(--panel) 60%);box-shadow:0 1px 0 rgba(255,255,255,.05) inset,0 18px 36px -24px #000}
+.card.wide{grid-column:1/-1}
+button{font:inherit;font-size:14px;display:inline-flex;gap:6px;align-items:center;padding:7px 13px;color:var(--text);background:color-mix(in srgb,var(--panel) 70%,#fff 6%);border:1px solid var(--line);border-radius:9px;cursor:pointer;transition:border-color .15s,background .15s}
+button:hover:not(:disabled){border-color:var(--acc)}
+button:active:not(:disabled){transform:translateY(1px)}
+button:disabled{opacity:.4;cursor:not-allowed}
+button.on,button.primary{background:var(--acc);color:var(--bg);border-color:var(--acc);font-weight:600;box-shadow:0 0 18px -4px color-mix(in srgb,var(--acc) 70%,transparent)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.play{border-radius:999px;padding:10px 22px;font-size:15px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:4px;padding:4px;align-self:flex-start;background:var(--bg);border:1px solid var(--line);border-radius:12px}
+.seg button{background:transparent;border:0;padding:6px 12px;color:var(--mute);box-shadow:none}
+.seg button.on{background:var(--acc);color:var(--bg);box-shadow:0 0 14px -4px var(--acc)}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.slots{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px}
+.slot{display:flex;flex-direction:column;gap:10px;padding:14px;background:var(--bg);border:1px solid var(--line);border-radius:12px;transition:border-color .2s,box-shadow .2s}
+.slot.act{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc),0 0 28px -8px var(--acc)}
+.sw{justify-content:flex-start;font-weight:600}
+.led{width:9px;height:9px;border-radius:50%;background:var(--line)}
+.slot.act .led{background:var(--acc);box-shadow:0 0 9px var(--acc)}
+.up{display:flex;gap:6px;align-items:center;color:var(--mute);cursor:pointer;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.up:hover{color:var(--text)}
+.sl{display:grid;grid-template-columns:92px 1fr 128px;gap:10px;align-items:center}
+.sl b{font-weight:500;color:var(--mute);text-align:right;font-size:13px;font-variant-numeric:tabular-nums}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:6px;border-radius:3px;background:linear-gradient(90deg,var(--acc) var(--p,50%),var(--line) var(--p,50%))}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:var(--text);border:3px solid var(--acc);box-shadow:0 0 12px -1px var(--acc);cursor:pointer}
+input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--text);border:3px solid var(--acc);cursor:pointer}
+input[type=checkbox]{accent-color:var(--acc);width:16px;height:16px;margin-top:3px}
+.wave{position:relative;height:84px;overflow:hidden;cursor:pointer;background:linear-gradient(180deg,var(--bg),color-mix(in srgb,var(--bg) 92%,var(--acc)));border:1px solid var(--line);border-radius:12px}
+.wave canvas{display:block;width:100%;height:100%;opacity:.8}
+.pl{position:absolute;top:0;bottom:0;left:0;background:color-mix(in srgb,var(--acc) 14%,transparent);pointer-events:none}
+.ph{position:absolute;top:0;bottom:0;width:2px;background:#fff;box-shadow:0 0 10px var(--acc),0 0 2px #fff}
+.lp{position:absolute;top:0;bottom:0;background:var(--acc);mix-blend-mode:screen;opacity:.25}
+.time{font-variant-numeric:tabular-nums;color:var(--mute);font-size:14px}
+.hint,small{color:var(--mute);font-size:13px}
+.lbl{margin:6px 0 0;color:var(--mute);font-size:13px}
+.chk{display:flex;gap:8px;align-items:flex-start;font-size:14px}
+.spec{display:flex;gap:10px;height:180px}
+.bar{position:relative;flex:1;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:repeating-linear-gradient(0deg,color-mix(in srgb,var(--line) 75%,transparent) 0 6px,transparent 6px 9px),var(--bg)}
+.fill{position:absolute;inset:0;transition:clip-path .08s linear;background:linear-gradient(0deg,var(--acc) 0 62%,#ffd166 84%,#ff5d5d);-webkit-mask:repeating-linear-gradient(0deg,#000 0 6px,transparent 6px 9px);mask:repeating-linear-gradient(0deg,#000 0 6px,transparent 6px 9px)}
+.tgt{position:absolute;left:0;right:0;height:0;border-top:2px dashed #fff;box-shadow:0 0 6px rgba(255,255,255,.6)}
+.bar span{position:absolute;bottom:5px;left:0;right:0;text-align:center;font-size:12px;font-weight:600;text-shadow:0 0 5px var(--bg),0 0 2px var(--bg)}
+.meter{display:flex;gap:10px;align-items:center}.meter.grow{flex:1;min-width:230px}
+.meter span{color:var(--mute);font-size:13px}
+.meter b{min-width:76px;padding:2px 10px;text-align:center;font-variant-numeric:tabular-nums;background:var(--bg);border:1px solid var(--line);border-radius:7px}
+.warn{color:#ff6b6b;border-color:#ff6b6b!important}
+.corr{position:relative;flex:1;height:8px;border-radius:4px;background:linear-gradient(90deg,#d6453d,var(--line) 50%,var(--acc))}
+.corr i{position:absolute;top:-4px;width:4px;height:16px;border-radius:2px;background:#fff;transform:translateX(-2px);box-shadow:0 0 8px #fff}
+.txt{flex:1;min-width:180px;padding:8px 12px;font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:9px}
+.notes,.checks{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.notes li{display:flex;gap:10px;align-items:center;padding:7px 10px;background:var(--bg);border:1px solid var(--line);border-radius:10px}
+.notes li span{flex:1}
+.notes li button:first-child{padding:2px 9px;color:var(--acc);font-variant-numeric:tabular-nums}
+.checks li{padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;transition:border-color .2s}
+.checks li:has(input:checked){border-color:var(--acc);color:var(--mute)}
+.checks label{display:flex;gap:10px;cursor:pointer}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:9;padding:9px 18px;font-weight:600;color:var(--bg);background:var(--acc);border-radius:10px;box-shadow:0 10px 30px -8px #000}
+@media(max-width:560px){.sl{grid-template-columns:76px 1fr}.sl b{grid-column:1/-1;text-align:left}.card{padding:14px}}
+@media(prefers-reduced-motion:reduce){.logo i,.fill{animation:none!important;transition:none}}
+/* ---- Responsif: PC, tablet, HP ---- */
+.app{padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right));padding-bottom:max(56px,calc(env(safe-area-inset-bottom) + 24px))}
+header,nav,main{max-width:1240px}
+.card{min-width:0}
+main{grid-template-columns:repeat(auto-fit,minmax(min(310px,100%),1fr))}
+nav{overflow-x:auto;scrollbar-width:none}
+nav button{flex:none;white-space:nowrap}
+@media(min-width:1400px){.app{font-size:16px}.spec{height:210px}.wave{height:100px}}
+@media(min-width:561px) and (max-width:1023px){
+  main{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .spec{height:170px}
+}
+@media(max-width:560px){
+  .app{padding-top:max(14px,env(safe-area-inset-top))}
+  header{flex-direction:column;align-items:stretch;gap:12px;margin-bottom:12px}
+  h1{font-size:19px}
+  nav{margin-bottom:12px}nav button{flex:1;padding:11px 10px}
+  .seg{display:flex;width:100%}
+  .seg button{flex:1 1 auto;justify-content:center;padding:8px 6px;font-size:13px}
+  .slots{grid-template-columns:1fr}
+  .wave{height:72px}
+  .spec{height:140px;gap:6px}.bar span{font-size:10px}
+  .row>.play{flex:1 1 100%;justify-content:center}
+  .row .time{margin-left:auto}
+  .meter.grow,.txt{min-width:100%}
+  .notes li{flex-wrap:wrap}
+}
+@media(max-height:480px) and (orientation:landscape){.app{padding-top:10px}.spec{height:110px}.wave{height:60px}}
+@media(pointer:coarse){
+  button{min-height:44px}.seg button{min-height:40px}.notes li button{min-height:36px}
+  input[type=range]{height:8px}
+  input[type=range]::-webkit-slider-thumb{width:26px;height:26px}
+  input[type=range]::-moz-range-thumb{width:20px;height:20px}
+  input[type=checkbox]{width:22px;height:22px}
+}
+`
