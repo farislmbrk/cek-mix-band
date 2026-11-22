@@ -1,6 +1,6 @@
-// DIY Studio & Stage Console by. Ares  v4.4  —  Vite + React + lucide-react + Web Audio API
+// DIY Studio & Stage Console by. Ares  v4.5  —  Vite + React + lucide-react + Web Audio API
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Play, Pause, Upload, Scissors, Copy, Trash2, Repeat, Download, StickyNote, Mic, Link2 } from 'lucide-react'
+import { Play, Pause, Upload, Scissors, Copy, Trash2, Repeat, Download, StickyNote, Mic, Link2, Music, Eye, EyeOff, Edit3, Check } from 'lucide-react'
 
 /* ---------- Konstanta ---------- */
 const THEMES = {
@@ -121,8 +121,10 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000)
 }
 
-/* ---------- Kunci, chord (akurasi ditingkatkan + akor extended) & pitch shifter ---------- */
+/* ---------- Kunci, chord, nashville/roman, voicing & pitch shifter ---------- */
 const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+const ROMAN_MAJ = ['I', 'bII', 'II', 'bIII', 'III', 'IV', '#IV', 'V', 'bVI', 'VI', 'bVII', 'VII']
+const ROMAN_MIN = ['i', 'bII', 'ii', 'III', 'III#', 'iv', 'v', 'V', 'VI', 'bVII', 'vii', 'VII']
 const KP = {
   maj: [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88],
   min: [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17],
@@ -130,7 +132,43 @@ const KP = {
 const mod12 = n => ((n % 12) + 12) % 12
 const keyName = (k, t = 0) => `${NOTES[mod12(k.root + t)]} ${k.mode === 'maj' ? 'mayor' : 'minor'}`
 const relKey = k => ({ root: k.mode === 'maj' ? (k.root + 9) % 12 : (k.root + 3) % 12, mode: k.mode === 'maj' ? 'min' : 'maj' })
-const tChord = (name, t) => { const m = name.match(/^([A-G]#?)(.*)$/); return m ? NOTES[mod12(NOTES.indexOf(m[1]) + t)] + m[2] : name }
+const parseChord = name => {
+  const m = (name || '').match(/^([A-G]#?)(.*)$/)
+  return m ? { rootNote: m[1], suffix: m[2] || '' } : { rootNote: 'C', suffix: '' }
+}
+const tChord = (name, t) => {
+  const { rootNote, suffix } = parseChord(name)
+  const idx = NOTES.indexOf(rootNote)
+  return idx >= 0 ? NOTES[mod12(idx + t)] + suffix : name
+}
+function chordToRoman(chordName, keyObj, transpose = 0) {
+  if (!keyObj) return '—'
+  const { rootNote, suffix } = parseChord(tChord(chordName, transpose))
+  const rIdx = NOTES.indexOf(rootNote)
+  if (rIdx < 0) return '—'
+  const tonic = mod12(keyObj.root + transpose)
+  const deg = mod12(rIdx - tonic)
+  const isMinorChord = /^m(?![a-z])|^dim|^m7b5/i.test(suffix)
+  const baseNum = keyObj.mode === 'min' ? ROMAN_MIN[deg] : ROMAN_MAJ[deg]
+  const num = isMinorChord ? baseNum.toLowerCase() : baseNum.toUpperCase()
+  const qual = suffix.replace(/^m(?![a-z])/, '')
+  return num + qual
+}
+function getVoicingHint(chordName, transpose = 0) {
+  const full = tChord(chordName, transpose)
+  const { rootNote, suffix } = parseChord(full)
+  const rIdx = NOTES.indexOf(rootNote)
+  const fifthNote = rIdx >= 0 ? NOTES[mod12(rIdx + 7)] : 'G'
+  const thirdNote = rIdx >= 0 ? NOTES[mod12(rIdx + (/^m(?!aj)/.test(suffix) ? 3 : 4))] : 'E'
+  const capo = mod12(-transpose)
+  const openRoot = capo > 0 ? NOTES[mod12(rIdx - capo)] + suffix : null
+  return {
+    full,
+    slash: `${full}/${fifthNote}`,
+    thirdSlash: `${full}/${thirdNote}`,
+    capoHint: capo > 0 && capo <= 7 ? `Capo fret ${capo} ≈ ${openRoot}` : 'Tanpa capo / shape standar',
+  }
+}
 
 const PITCH_JS = `
 class PitchShift extends AudioWorkletProcessor {
@@ -237,7 +275,6 @@ function analyzeHarmony(buf, chordMode = 'extended') {
   const len = Math.floor(c0.length / D), mono = new Float32Array(len)
   for (let i = 0; i < len; i++) { let s = 0; for (let k = 0; k < D; k++) s += c0[i * D + k] + c1[i * D + k]; mono[i] = s / (2 * D) }
 
-  // Estimasi micro-tuning (A4 offset) agar deteksi pitch class tetap akurat walau tuning sedikit bergeser
   const lo = Math.ceil(65 * N / sr), hi = Math.floor(2200 * N / sr)
   const bassHi = Math.floor(240 * N / sr)
   const win = Float32Array.from({ length: N }, (_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N))
@@ -257,7 +294,6 @@ function analyzeHarmony(buf, chordMode = 'extended') {
       const freq = (k * sr) / N
       const midi = 12 * Math.log2(freq / 440) + 69
       const pc = mod12(Math.round(midi))
-      // Beri bobot lebih pada rentang fundamental & harmonic rendah (100-700 Hz), redam overtone tinggi
       const fWeight = freq < 320 ? 1.35 : freq < 850 ? 1.0 : 0.62
       const val = Math.pow(mag, 0.65) * fWeight
       ch[pc] += val
@@ -275,7 +311,6 @@ function analyzeHarmony(buf, chordMode = 'extended') {
     rawFrames.push({ t: Math.max(0, (s + N / 2) / sr - 0.19), ch: norm, bassPc })
   }
 
-  // Smoothing temporal antar frame (EMA) untuk mengurangi lonjakan akibat transient perkusi/gitar
   const frames = rawFrames.map((f, idx) => {
     if (!f) return null
     const prev = rawFrames[idx - 1]?.ch || f.ch
@@ -301,7 +336,6 @@ function analyzeHarmony(buf, chordMode = 'extended') {
     tplList.forEach((c, i) => {
       let d = 0
       for (let k = 0; k < 12; k++) d += f.ch[k] * c.t[k]
-      // Bonus root/bass note untuk menghindari salah baca inversi (misal C/E terbaca Em)
       const bassBoost = f.bassPc === c.root ? 0.11 : f.bassPc === c.fifth ? 0.04 : 0
       const score = (d / (cn * c.n)) + bassBoost - c.penalty
       if (score > bs) { bs = score; best = i }
@@ -309,7 +343,6 @@ function analyzeHarmony(buf, chordMode = 'extended') {
     return best
   })
 
-  // Filter median 3-frame untuk menghilangkan kedipan 1-frame yang salah
   const sm = lab.map((l, i) => (i && i < lab.length - 1 && lab[i - 1] === lab[i + 1] ? lab[i - 1] : l))
   const runs = []
   sm.forEach((l, i) => {
@@ -337,17 +370,14 @@ function createEngine() {
   shifted.gain.value = 0
   gA.connect(pre); gB.connect(pre); pre.connect(direct); direct.connect(bus); shifted.connect(bus)
 
-  // analisis stereo (korelasi) — pre monitor
   const sp = ctx.createChannelSplitter(2), anL = ctx.createAnalyser(), anR = ctx.createAnalyser()
   anL.fftSize = anR.fftSize = 2048
   bus.connect(sp); sp.connect(anL, 0); sp.connect(anR, 1)
 
-  // matriks kanal (Stereo / Mono / Side / Vocal Remover / Pemisah Instrumen)
   const sp2 = ctx.createChannelSplitter(2), mg = ctx.createChannelMerger(2), mx = []
   bus.connect(sp2)
   for (let o = 0; o < 2; o++) for (let i = 0; i < 2; i++) { const g = ctx.createGain(); sp2.connect(g, i); g.connect(mg, 0, o); mx.push(g) }
 
-  // pemisah instrumen (stem filter) -> solo band -> simulasi perangkat -> analyser -> master
   const stHp = bq('highpass', 10), stLp = bq('lowpass', 20000), stPk = bq('peaking', 1000, 1)
   const sHp = bq('highpass', 10), sLp = bq('lowpass', 20000), dHp = bq('highpass', 10), dLp = bq('lowpass', 20000), dLs = bq('lowshelf', 120)
   const an = ctx.createAnalyser(); an.fftSize = 4096; an.smoothingTimeConstant = 0.8
@@ -361,7 +391,6 @@ function createEngine() {
   master.connect(outVol); outVol.connect(limDirect); limDirect.connect(ctx.destination)
   outVol.connect(comp); comp.connect(limComp); limComp.connect(ctx.destination)
 
-  // ambient noise
   const nb = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), nd = nb.getChannelData(0)
   for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1
   const ns = ctx.createBufferSource(); ns.buffer = nb; ns.loop = true
@@ -388,30 +417,64 @@ const Seg = ({ value, options, onChange }) => (
   <div className="seg">{options.map(([k, l]) => <button key={k} className={value === k ? 'on' : ''} onClick={() => onChange(k)}>{l}</button>)}</div>
 )
 
-function EqPanel({ bands, setBands, eqOn, setEqOn, scope, setScope, sel, setSel, flash, specCurve }) {
-  const W = 720, H = 280
-  const svg = useRef(null), drag = useRef(null)
-  const X = f => fx(f) * W, Y = g => H / 2 - (g / GR) * (H / 2)
-  const upd = (i, p) => setBands(b => b.map((x, j) => (j === i ? { ...x, ...p } : x)))
-  const { freqs, tot } = useMemo(() => eqResponse(bands), [bands])
-  const line = 'M' + Array.from(freqs, (f, k) => `${X(f).toFixed(1)},${Y(Math.max(-GR, Math.min(GR, tot[k]))).toFixed(1)}`).join('L')
+const BAND_COLORS = ['#60a5fa', '#38bdf8', '#34d399', '#fbbf24', '#fb7185', '#c084fc']
 
-  // Grafik spektrum audio real-time yang mengikuti lagu di belakang kurva EQ
+function EqPanel({ bands, setBands, eqOn, setEqOn, scope, setScope, sel, setSel, flash, specCurve }) {
+  const W = 760, H = 300
+  const svg = useRef(null), drag = useRef(null)
+  const [hoverIdx, setHoverIdx] = useState(null)
+  const [showIndiv, setShowIndiv] = useState(true)
+  const [showSpec, setShowSpec] = useState(true)
+
+  const X = f => fx(f) * W
+  const Y = g => H / 2 - (g / GR) * (H / 2 - 14)
+  const upd = (i, p) => setBands(b => b.map((x, j) => (j === i ? { ...x, ...p } : x)))
+
+  const { freqs, tot, indiv } = useMemo(() => {
+    const base = eqResponse(bands)
+    if (!respCtx) respCtx = new OfflineAudioContext(1, 1, 48000)
+    const perBand = bands.map((b, i) => {
+      const f = respCtx.createBiquadFilter(), m = new Float32Array(base.freqs.length), p = new Float32Array(base.freqs.length)
+      f.type = EQ_DEFAULT[i].type; f.frequency.value = b.f; f.gain.value = b.g; f.Q.value = b.q
+      f.getFrequencyResponse(base.freqs, m, p)
+      return Array.from(m, v => 20 * Math.log10(v))
+    })
+    return { ...base, indiv: perBand }
+  }, [bands])
+
+  const buildPath = arr =>
+    'M' + Array.from(freqs, (f, k) => `${X(f).toFixed(1)},${Y(Math.max(-GR, Math.min(GR, arr[k]))).toFixed(1)}`).join(' L')
+
+  const line = useMemo(() => buildPath(tot), [tot, freqs]) // eslint-disable-line react-hooks/exhaustive-deps
+  const indivLines = useMemo(() => indiv.map(arr => buildPath(arr)), [indiv, freqs]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const specArea = useMemo(() => {
-    if (!specCurve || !specCurve.length) return `M0,${H} L${W},${H} Z`
+    if (!showSpec || !specCurve || !specCurve.length) return ''
     const pts = specCurve.map((val, idx) => {
       const x = (idx / (specCurve.length - 1)) * W
-      const y = H - Math.max(0, Math.min(1, val)) * (H - 12)
+      const y = H - Math.max(0, Math.min(1, val)) * (H - 16)
       return `${x.toFixed(1)},${y.toFixed(1)}`
     })
     return `M0,${H} L${pts.join(' L')} L${W},${H} Z`
-  }, [specCurve])
+  }, [specCurve, showSpec])
+
+  const specTopLine = useMemo(() => {
+    if (!showSpec || !specCurve || !specCurve.length) return ''
+    return 'M' + specCurve.map((val, idx) => {
+      const x = (idx / (specCurve.length - 1)) * W
+      const y = H - Math.max(0, Math.min(1, val)) * (H - 16)
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    }).join(' L')
+  }, [specCurve, showSpec])
 
   const move = e => {
     if (drag.current == null) return
     const r = svg.current.getBoundingClientRect()
-    const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)), y = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height))
-    upd(drag.current, { f: Math.round(FMIN * Math.pow(FMAX / FMIN, x)), g: Math.round((GR - y * 2 * GR) * 10) / 10 })
+    const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
+    const y = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height))
+    const newFreq = Math.round(FMIN * Math.pow(FMAX / FMIN, x))
+    const newGain = Math.max(-GR, Math.min(GR, Math.round((GR - y * 2 * GR) * 2) / 2))
+    upd(drag.current, { f: newFreq, g: newGain })
   }
   const key = (e, i) => {
     const b = bands[i], k = e.key
@@ -430,50 +493,162 @@ function EqPanel({ bands, setBands, eqOn, setEqOn, scope, setScope, sel, setSel,
       setBands(EQ_DEFAULT.map((d, i) => ({ ...d, f: +b[i].f || d.f, g: +b[i].g || 0, q: +b[i].q || d.q }))); flash('Preset EQ dimuat')
     } catch { flash('Belum ada preset tersimpan') }
   }
+
+  const activeBandIdx = hoverIdx ?? sel
+  const activeBand = bands[activeBandIdx]
+
   return (<>
-    <div className="row">
-      <button className={eqOn ? 'on' : ''} onClick={() => setEqOn(!eqOn)}>{eqOn ? 'EQ ON' : 'EQ OFF'}</button>
-      <small>Terapkan ke</small>
-      <Seg value={scope} onChange={setScope} options={[['A', 'Track A'], ['B', 'Track B'], ['AB', 'Keduanya']]} />
+    <div className="eq-toolbar">
+      <div className="row">
+        <button className={eqOn ? 'on' : ''} onClick={() => setEqOn(!eqOn)}>{eqOn ? 'EQ ON' : 'EQ OFF'}</button>
+        <small>Terapkan ke</small>
+        <Seg value={scope} onChange={setScope} options={[['A', 'Track A'], ['B', 'Track B'], ['AB', 'Keduanya']]} />
+      </div>
+      <div className="row">
+        <button className={showIndiv ? 'on' : ''} onClick={() => setShowIndiv(v => !v)}>Kurva Per-Band</button>
+        <button className={showSpec ? 'on' : ''} onClick={() => setShowSpec(v => !v)}>RTA Spektrum</button>
+      </div>
     </div>
-    <svg ref={svg} viewBox={`0 0 ${W} ${H}`} className={`eqg${eqOn ? '' : ' off'}`} onPointerMove={move}
-      onPointerUp={() => { drag.current = null }} onPointerCancel={() => { drag.current = null }}>
-      <defs>
-        <linearGradient id="eqSpecGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="var(--acc)" stopOpacity="0.34" />
-          <stop offset="100%" stopColor="var(--acc)" stopOpacity="0.02" />
-        </linearGradient>
-      </defs>
-      {/* Grafik spektrum real-time di belakang grid dan kurva EQ */}
-      <path d={specArea} fill="url(#eqSpecGrad)" />
-      {[50, 100, 200, 500, 1000, 2000, 5000, 10000].map(f => (
-        <g key={f}><line x1={X(f)} x2={X(f)} y1="0" y2={H} className="gl" /><text x={X(f) + 3} y={H - 5} className="gt">{f >= 1000 ? f / 1000 + 'k' : f}</text></g>))}
-      {[-12, -6, 0, 6, 12].map(g => (
-        <g key={g}><line x1="0" x2={W} y1={Y(g)} y2={Y(g)} className={g === 0 ? 'gl z' : 'gl'} /><text x="4" y={Y(g) - 3} className="gt">{g > 0 ? '+' + g : g}</text></g>))}
-      <path d={`${line}L${W},${Y(0)}L0,${Y(0)}Z`} className="ar" />
-      <path d={line} className="cv" />
-      {bands.map((b, i) => (
-        <g key={i}>
-          <circle cx={X(b.f)} cy={Y(b.g)} r={sel === i ? 14 : 11} className={`node${sel === i ? ' sel' : ''}`} />
-          <text className={`nt${sel === i ? ' sel' : ''}`} x={X(b.f)} y={Y(b.g) + 4}>{i + 1}</text>
-          <circle cx={X(b.f)} cy={Y(b.g)} r="26" fill="transparent" className="hit" tabIndex={0} role="slider"
-            aria-label={`Band ${i + 1}: ${fmtHz(b.f)}, ${b.g} dB`} aria-valuenow={b.g}
-            onPointerDown={e => { e.preventDefault(); drag.current = i; setSel(i); svg.current.setPointerCapture(e.pointerId) }}
-            onFocus={() => setSel(i)} onKeyDown={e => key(e, i)} onDoubleClick={() => upd(i, { g: 0 })} />
-        </g>))}
-    </svg>
-    <small className="hint">Geser titik: kiri-kanan mengatur frekuensi, atas-bawah mengatur gain. Grafik biru di belakang kurva mengikuti spektrum audio secara real-time. Klik dua kali untuk mengembalikan gain band itu ke 0.</small>
+
+    <div className="eq-stage">
+      <svg ref={svg} viewBox={`0 0 ${W} ${H}`} className={`eqg${eqOn ? '' : ' off'}`} onPointerMove={move}
+        onPointerUp={() => { drag.current = null }} onPointerCancel={() => { drag.current = null }}>
+        <defs>
+          <linearGradient id="eqSpecGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--acc)" stopOpacity="0.28" />
+            <stop offset="65%" stopColor="var(--acc)" stopOpacity="0.07" />
+            <stop offset="100%" stopColor="var(--acc)" stopOpacity="0.01" />
+          </linearGradient>
+          <linearGradient id="eqCurveGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="#60a5fa" />
+            <stop offset="35%" stopColor="var(--acc)" />
+            <stop offset="70%" stopColor="#34d399" />
+            <stop offset="100%" stopColor="#fbbf24" />
+          </linearGradient>
+          <linearGradient id="eqFillGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--acc)" stopOpacity="0.32" />
+            <stop offset="50%" stopColor="var(--acc)" stopOpacity="0.1" />
+            <stop offset="100%" stopColor="var(--acc)" stopOpacity="0.01" />
+          </linearGradient>
+        </defs>
+
+        {showSpec && specArea && (
+          <>
+            <path d={specArea} fill="url(#eqSpecGrad)" />
+            <path d={specTopLine} fill="none" stroke="color-mix(in srgb,var(--acc) 45%,transparent)" strokeWidth="1.2" strokeDasharray="3 3" />
+          </>
+        )}
+
+        {[50, 100, 200, 500, 1000, 2000, 5000, 10000].map(f => (
+          <g key={f}>
+            <line x1={X(f)} x2={X(f)} y1="14" y2={H - 18} className="gl" />
+            <text x={X(f)} y={H - 4} textAnchor="middle" className="gt">{f >= 1000 ? f / 1000 + 'k' : f}</text>
+          </g>
+        ))}
+
+        {[-12, -6, 0, 6, 12].map(g => (
+          <g key={g}>
+            <line x1="28" x2={W - 8} y1={Y(g)} y2={Y(g)} className={g === 0 ? 'gl z' : 'gl'} />
+            <text x="6" y={Y(g) + 3.5} className="gt">{g > 0 ? '+' + g : g}</text>
+          </g>
+        ))}
+
+        {showIndiv && bands.map((b, i) => {
+          const isFocus = sel === i || hoverIdx === i
+          return (
+            <path
+              key={`ind-${i}`}
+              d={indivLines[i]}
+              fill="none"
+              stroke={BAND_COLORS[i % BAND_COLORS.length]}
+              strokeWidth={isFocus ? 2 : 1.15}
+              strokeOpacity={isFocus ? 0.85 : 0.34}
+              strokeDasharray={EQ_DEFAULT[i].type === 'peaking' ? 'none' : '4 3'}
+            />
+          )
+        })}
+
+        <path d={`${line} L${W - 8},${Y(0)} L28,${Y(0)} Z`} fill="url(#eqFillGrad)" className="ar" />
+        <path d={line} stroke="url(#eqCurveGrad)" className="cv" />
+
+        {bands.map((b, i) => {
+          const cx = X(b.f), cy = Y(b.g), isSel = sel === i, col = BAND_COLORS[i % BAND_COLORS.length]
+          return (
+            <g key={i}>
+              {isSel && (
+                <line x1={cx} x2={cx} y1={Y(0)} y2={cy} stroke={col} strokeWidth="1.5" strokeDasharray="3 3" opacity="0.7" />
+              )}
+              <circle
+                cx={cx}
+                cy={cy}
+                r={isSel ? 15 : 11.5}
+                fill={isSel ? col : 'var(--panel)'}
+                stroke={col}
+                strokeWidth={isSel ? 3 : 2.5}
+                className={`node${isSel ? ' sel' : ''}`}
+              />
+              <text
+                className={`nt${isSel ? ' sel' : ''}`}
+                x={cx}
+                y={cy + 4}
+                fill={isSel ? '#08101e' : 'var(--text)'}
+              >
+                {i + 1}
+              </text>
+              <circle
+                cx={cx}
+                cy={cy}
+                r="26"
+                fill="transparent"
+                className="hit"
+                tabIndex={0}
+                role="slider"
+                aria-label={`Band ${i + 1}: ${fmtHz(b.f)}, ${b.g} dB`}
+                aria-valuenow={b.g}
+                onPointerEnter={() => setHoverIdx(i)}
+                onPointerLeave={() => setHoverIdx(null)}
+                onPointerDown={e => { e.preventDefault(); drag.current = i; setSel(i); svg.current.setPointerCapture(e.pointerId) }}
+                onFocus={() => setSel(i)}
+                onKeyDown={e => key(e, i)}
+                onDoubleClick={() => upd(i, { g: 0 })}
+              />
+            </g>
+          )
+        })}
+      </svg>
+
+      {activeBand && (
+        <div className="eq-hud">
+          <span className="hud-dot" style={{ background: BAND_COLORS[activeBandIdx % BAND_COLORS.length] }} />
+          <b>Band {activeBandIdx + 1}</b>
+          <span>{fmtHz(activeBand.f)}</span>
+          <span className="hud-gain">{activeBand.g > 0 ? `+${activeBand.g}` : activeBand.g} dB</span>
+          <span>Q {activeBand.q.toFixed(1)}</span>
+        </div>
+      )}
+    </div>
+
+    <small className="hint">Seret titik bernomor 1–6 untuk mengubah frekuensi (kiri-kanan) dan gain (atas-bawah). Garis putus-putus halus menunjukkan kurva tiap band, sedangkan area belakang menampilkan spektrum RTA real-time. Klik dua kali titik untuk reset ke 0 dB.</small>
+
     <div className="bands">
-      {bands.map((b, i) => (
-        <div key={i} className={`band${sel === i ? ' sel' : ''}`} onClick={() => setSel(i)}>
-          <b>Band {i + 1} · {fmtHz(b.f)}</b>
-          <Slider label="Freq" min={0} max={1} step={0.002} value={fx(b.f)} show={fmtHz(b.f)}
-            onChange={v => upd(i, { f: Math.round(FMIN * Math.pow(FMAX / FMIN, v)) })} />
-          <Slider label="Gain" min={-GR} max={GR} step={0.5} value={b.g} show={`${b.g > 0 ? '+' : ''}${b.g} dB`} onChange={v => upd(i, { g: v })} />
-          <Slider label="Q" min={0.3} max={6} step={0.1} value={b.q} show={EQ_DEFAULT[i].type === 'peaking' ? b.q.toFixed(1) : 'tetap'}
-            disabled={EQ_DEFAULT[i].type !== 'peaking'} onChange={v => upd(i, { q: v })} />
-        </div>))}
+      {bands.map((b, i) => {
+        const col = BAND_COLORS[i % BAND_COLORS.length]
+        return (
+          <div key={i} className={`band${sel === i ? ' sel' : ''}`} style={{ '--bcol': col }} onClick={() => setSel(i)}>
+            <div className="band-head">
+              <span className="bdot" style={{ background: col }} />
+              <b>Band {i + 1} · {fmtHz(b.f)}</b>
+            </div>
+            <Slider label="Freq" min={0} max={1} step={0.002} value={fx(b.f)} show={fmtHz(b.f)}
+              onChange={v => upd(i, { f: Math.round(FMIN * Math.pow(FMAX / FMIN, v)) })} />
+            <Slider label="Gain" min={-GR} max={GR} step={0.5} value={b.g} show={`${b.g > 0 ? '+' : ''}${b.g} dB`} onChange={v => upd(i, { g: v })} />
+            <Slider label="Q" min={0.3} max={6} step={0.1} value={b.q} show={EQ_DEFAULT[i].type === 'peaking' ? b.q.toFixed(1) : 'tetap'}
+              disabled={EQ_DEFAULT[i].type !== 'peaking'} onChange={v => upd(i, { q: v })} />
+          </div>
+        )
+      })}
     </div>
+
     <div className="row">
       <small>Preset</small>
       {Object.entries(EQ_PRESETS).map(([k, [n, g]]) => (
@@ -507,6 +682,18 @@ export default function App() {
   const [tr, setTr] = useState({ A: 0, B: 0 })
   const [chordMode, setChordMode] = useState('extended') // 'basic' | 'extended'
   const [stemMode, setStemMode] = useState('full') // fitur pemisah instrumen
+
+  // Opsi Pendamping Chord Sheet & Latihan + Tampilan Chord Sheet / Progresi Berjalan
+  const [sheetView, setSheetView] = useState('grid') // 'grid' | 'timeline' | 'compact'
+  const [notationMode, setNotationMode] = useState('both') // 'chord' | 'roman' | 'both'
+  const [showVoicing, setShowVoicing] = useState(true)
+  const [earQuiz, setEarQuiz] = useState(false) // mode latihan tebak chord berjalan
+  const [quizReveal, setQuizReveal] = useState(false)
+  const [customChords, setCustomChords] = useState({ A: {}, B: {} }) // koreksi manual chord per slot & index
+  const [editingIdx, setEditingIdx] = useState(null)
+  const [editVal, setEditVal] = useState('')
+  const activeSheetItemRef = useRef(null)
+
   const [keepPitch, setKeepPitch] = useState(true)
   const [pitchOk, setPitchOk] = useState(false)
   const [outVol, setOutVol] = useState(1)
@@ -596,7 +783,7 @@ export default function App() {
   const switchTrack = x => {
     if (!files[x] || x === active) return
     const p = Math.min(getPos(), files[x].buf.duration - 0.1)
-    setActive(x); S.current.active = x; setP(p)
+    setActive(x); S.current.active = x; setP(p); setEditingIdx(null)
     if (S.current.playing) restart(p, { active: x })
   }
   const changeLoop = next => {
@@ -617,6 +804,8 @@ export default function App() {
       const buf = await e.ctx.decodeAudioData(ab)
       const lufs = estimateLufs(buf)
       const info = { name, buf, peaks: waveformPeaks(buf), bpm: detectBpm(buf), lufs, norm: Math.min(1, 10 ** ((-14 - lufs) / 20)) }
+      setCustomChords(c => ({ ...c, [slot]: {} }))
+      setEditingIdx(null)
       setFiles(f => ({ ...f, [slot]: info }))
       setTimeout(() => {
         const harm = analyzeHarmony(buf, chordMode)
@@ -652,7 +841,6 @@ export default function App() {
     } catch { flash('Mikrofon tidak bisa diakses. Izinkan akses mikrofon di browser.') }
   }
 
-  // Analisis ulang harmony saat mode akor (Dasar vs Extended) diubah
   useEffect(() => {
     ['A', 'B'].forEach(slot => {
       const buf = files[slot]?.buf
@@ -692,7 +880,6 @@ export default function App() {
   }, [device, ready])
   useEffect(() => { if (ready) { const [h, l] = SOLO[solo]; set(eng.current.sHp.frequency, h); set(eng.current.sLp.frequency, l) } }, [solo, ready])
 
-  // Sinkronisasi Pemisah Instrumen + Kanal Stereo/Mono/Vocal Remover
   useEffect(() => {
     if (!ready) return
     const e = eng.current
@@ -766,7 +953,6 @@ export default function App() {
         const raw = BANDS.map(([, lo, hi]) => { let s = 0, c = 0; for (let i = Math.floor(lo / hz); i <= Math.ceil(hi / hz); i++) { s += f[i]; c++ } return Math.max(-100, s / c) })
         smooth.current = smooth.current.map((v, i) => v * 0.8 + raw[i] * 0.2)
 
-        // Sampling 64 titik spektrum logaritmik (20 Hz - 20 kHz) untuk grafik di belakang kurva EQ 6-band
         const pts = new Array(64)
         for (let k = 0; k < 64; k++) {
           const freq = FMIN * Math.pow(FMAX / FMIN, k / 63)
@@ -863,9 +1049,55 @@ export default function App() {
     const a = t.slice(-6)
     if (a.length > 1) setMet(m => ({ ...m, bpm: Math.max(40, Math.min(220, Math.round(60000 / ((a[a.length - 1] - a[0]) / (a.length - 1))))) }))
   }
-  const harm = cur?.harm, chords = harm?.chords || [], trA = tr[active]
+
+  const harm = cur?.harm
+  const rawChords = harm?.chords || []
+  const chords = useMemo(() => {
+    const ov = customChords[active] || {}
+    return rawChords.map((c, idx) => ({
+      ...c,
+      name: ov[idx] || c.name,
+      edited: Boolean(ov[idx]),
+    }))
+  }, [rawChords, customChords, active])
+
+  const trA = tr[active]
   let ci = -1; chords.forEach((c, i) => { if (c.t <= pos) ci = i })
   const c0 = Math.max(0, ci - 2)
+
+  // Reset reveal tebak chord saat berpindah akor aktif
+  useEffect(() => { setQuizReveal(false) }, [ci, active])
+
+  // Auto-scroll chord sheet mengikuti akor yang sedang dimainkan
+  useEffect(() => {
+    if (activeSheetItemRef.current && (sheetView === 'timeline' || sheetView === 'grid')) {
+      activeSheetItemRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+    }
+  }, [ci, sheetView])
+
+  const saveEditChord = idx => {
+    const clean = editVal.trim()
+    setCustomChords(prev => {
+      const slotMap = { ...(prev[active] || {}) }
+      if (clean) slotMap[idx] = clean
+      else delete slotMap[idx]
+      return { ...prev, [active]: slotMap }
+    })
+    setEditingIdx(null)
+    flash(clean ? `Chord #${idx + 1} diperbarui ke ${clean}` : `Chord #${idx + 1} dikembalikan ke deteksi otomatis`)
+  }
+
+  const renderChordLabel = chord => {
+    const transposed = tChord(chord.name, trA)
+    const roman = chordToRoman(chord.name, harm?.key, trA)
+    if (notationMode === 'roman') return roman
+    if (notationMode === 'both') return `${transposed} (${roman})`
+    return transposed
+  }
+
+  const curChordObj = ci >= 0 ? chords[ci] : null
+  const nextChordObj = ci >= 0 && chords[ci + 1] ? chords[ci + 1] : null
+  const voicing = curChordObj ? getVoicingHint(curChordObj.name, trA) : null
 
   /* ----- render ----- */
   const T = THEMES[theme]
@@ -879,7 +1111,7 @@ export default function App() {
       <header>
         <div className="brand">
           <span className={`logo${playing ? ' live' : ''}`}><i /><i /><i /></span>
-          <div><h1>DIY Studio &amp; Stage Console <span className="by">by. Ares</span></h1><small>v4.4 · cek mix band</small></div>
+          <div><h1>DIY Studio &amp; Stage Console <span className="by">by. Ares</span></h1><small>v4.5 · cek mix band</small></div>
         </div>
         <Seg value={theme} onChange={setTheme} options={Object.entries(THEMES).map(([k, v]) => [k, v.n])} />
       </header>
@@ -936,7 +1168,7 @@ export default function App() {
           <small className="hint">Pisahkan elemen instrumen secara real-time (Vokal/Lead, Bass/Sub, Drums/Beat, Gitar/Side, atau Minus Vocal) menggunakan pemrosesan Mid-Side dan filter frekuensi tanpa mengubah file asli.</small>
         </Card>
 
-        <Card title="Kunci, Chord & Transpose" wide>
+        <Card title="Kunci, Chord, Pendamping Latihan & Chord Sheet" wide>
           <div className="row">
             <small>Jenis deteksi akor</small>
             <Seg value={chordMode} onChange={setChordMode} options={[['basic', 'Dasar (Mayor/Minor/7)'], ['extended', 'Extended (add9 / sus / 9 / dim7)']]} />
@@ -962,13 +1194,120 @@ export default function App() {
             <button onClick={matchKey}>Samakan kunci B ke A</button>
             <small>Berlaku untuk Track {active}. {pitchOk ? '' : 'Pitch shifter belum siap.'}</small>
           </div>
+
           {chords.length > 0 ? (<>
-            <div className="now"><span>{ci >= 0 ? tChord(chords[ci].name, trA) : '—'}</span>
-              <small>berikutnya: {chords[ci + 1] ? tChord(chords[ci + 1].name, trA) : '—'}</small></div>
-            <div className="chips">{chords.slice(c0, c0 + 12).map((c, k) => (
-              <button key={c0 + k} className={c0 + k === ci ? 'on' : ''} onClick={() => seek(c.t)}>{tChord(c.name, trA)}<small>{fmt(c.t)}</small></button>))}</div>
+            {/* Opsi Pendamping Latihan & Tampilan Chord Sheet */}
+            <div className="sheet-opts">
+              <div className="row">
+                <small>Tampilan Sheet</small>
+                <Seg value={sheetView} onChange={setSheetView} options={[['grid', 'Grid Akor'], ['timeline', 'Progresi Berjalan'], ['compact', 'Ringkas']]} />
+              </div>
+              <div className="row">
+                <small>Notasi</small>
+                <Seg value={notationMode} onChange={setNotationMode} options={[['chord', 'Nama Chord'], ['roman', 'Angka Romawi / Nashville'], ['both', 'Chord + Romawi']]} />
+              </div>
+              <div className="row">
+                <button className={showVoicing ? 'on' : ''} onClick={() => setShowVoicing(v => !v)}>
+                  <Music size={14} /> Voicing &amp; Capo
+                </button>
+                <button className={earQuiz ? 'on' : ''} onClick={() => { setEarQuiz(q => !q); setQuizReveal(false) }}>
+                  {earQuiz ? <EyeOff size={14} /> : <Eye size={14} />} Latihan Tebak Chord
+                </button>
+              </div>
+            </div>
+
+            {/* Chord Aktif + Pendamping Voicing / Ear Training */}
+            <div className="now-box">
+              <div className="now">
+                <span>
+                  {curChordObj
+                    ? (earQuiz && !quizReveal ? '? (Tebak Chord)' : renderChordLabel(curChordObj))
+                    : '—'}
+                </span>
+                {earQuiz && curChordObj && (
+                  <button className="primary" onClick={() => setQuizReveal(r => !r)}>
+                    {quizReveal ? 'Sembunyikan Jawaban' : 'Buka Jawaban'}
+                  </button>
+                )}
+                <small>
+                  berikutnya: {nextChordObj
+                    ? (earQuiz && !quizReveal ? '?' : renderChordLabel(nextChordObj))
+                    : '—'}
+                </small>
+              </div>
+
+              {showVoicing && voicing && (!earQuiz || quizReveal) && (
+                <div className="voicing-bar">
+                  <span><b>Alternatif Voicing:</b> {voicing.slash} · {voicing.thirdSlash}</span>
+                  <span><b>Panduan Capo:</b> {voicing.capoHint}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Chord Sheet / Progresi Berjalan dengan Klik Seek & Edit Manual */}
+            <div className={`chord-sheet view-${sheetView}`}>
+              {chords.map((c, idx) => {
+                const isCur = idx === ci
+                const isPast = ci >= 0 && idx < ci
+                const hiddenByQuiz = earQuiz && !quizReveal && idx >= ci
+                return (
+                  <div
+                    key={`${idx}-${c.t}`}
+                    ref={isCur ? activeSheetItemRef : null}
+                    className={`sheet-cell${isCur ? ' cur' : ''}${isPast ? ' past' : ''}${c.edited ? ' edited' : ''}`}
+                  >
+                    {editingIdx === idx ? (
+                      <div className="edit-inline" onClick={e => e.stopPropagation()}>
+                        <input
+                          className="mini-in"
+                          value={editVal}
+                          placeholder={c.name}
+                          onChange={e => setEditVal(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') saveEditChord(idx)
+                            if (e.key === 'Escape') setEditingIdx(null)
+                          }}
+                          autoFocus
+                        />
+                        <button aria-label="Simpan chord" onClick={() => saveEditChord(idx)}><Check size={13} /></button>
+                      </div>
+                    ) : (
+                      <>
+                        <button className="cell-main" onClick={() => seek(c.t)} title="Klik untuk lompat ke waktu chord ini">
+                          <span className="cell-idx">#{idx + 1} · {fmt(c.t)}</span>
+                          <strong className="cell-ch">{hiddenByQuiz ? '?' : renderChordLabel(c)}</strong>
+                          {notationMode !== 'both' && !hiddenByQuiz && (
+                            <span className="cell-sub">
+                              {notationMode === 'roman' ? tChord(c.name, trA) : chordToRoman(c.name, harm?.key, trA)}
+                            </span>
+                          )}
+                        </button>
+                        <button
+                          className="cell-edit"
+                          aria-label={`Edit chord ${idx + 1}`}
+                          title="Koreksi akor manual"
+                          onClick={e => { e.stopPropagation(); setEditingIdx(idx); setEditVal(c.name) }}
+                        >
+                          <Edit3 size={12} />
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Ringkasan Cepat 12 Akor Terdekat */}
+            <div className="chips">{chords.slice(c0, c0 + 12).map((c, k) => {
+              const realIdx = c0 + k
+              const hide = earQuiz && !quizReveal && realIdx >= ci
+              return (
+                <button key={realIdx} className={realIdx === ci ? 'on' : ''} onClick={() => seek(c.t)}>
+                  {hide ? '?' : renderChordLabel(c)}<small>{fmt(c.t)}</small>
+                </button>)
+            })}</div>
           </>) : <small className="hint">{harm ? 'Chord tidak terdeteksi pada audio ini.' : 'Unggah lagu untuk melihat kunci dan chord.'}</small>}
-          <small className="hint">Deteksi chord sudah dikoreksi dengan bobot nada bass/root serta filter smoothing antar-frame agar tidak mudah meleset saat transisi ketukan.</small>
+          <small className="hint">Klik akor di Chord Sheet untuk langsung seek ke waktunya, atau klik ikon pensil untuk mengoreksi akor secara manual sesuai telingamu.</small>
         </Card>
 
         <Card title="Spektrum & Meter" wide>
@@ -1180,20 +1519,27 @@ nav button{flex:none;white-space:nowrap}
   input[type=checkbox]{width:22px;height:22px}
 }
 /* ---- EQ interaktif, sumber lain, branding ---- */
-.eqg{display:block;width:100%;height:auto;touch-action:none;background:var(--bg);border:1px solid var(--line);border-radius:12px}
-.eqg.off{opacity:.45}
-.eqg .gl{stroke:var(--line);stroke-width:1}.eqg .z{stroke:var(--mute);stroke-dasharray:4 4}
-.eqg .gt{fill:var(--mute);font-size:11px}
-.eqg .ar{fill:color-mix(in srgb,var(--acc) 18%,transparent)}
-.eqg .cv{fill:none;stroke:var(--acc);stroke-width:2.5;stroke-linejoin:round;filter:drop-shadow(0 0 6px var(--acc))}
-.eqg .node{fill:var(--bg);stroke:var(--acc);stroke-width:3;pointer-events:none}
-.eqg .node.sel{fill:var(--acc)}
-.eqg .nt{fill:var(--text);font-size:12px;font-weight:700;text-anchor:middle;pointer-events:none}
-.eqg .nt.sel{fill:var(--bg)}
-.eqg .hit{cursor:grab;outline:none}.eqg .hit:focus-visible{stroke:var(--text);stroke-width:2}
+.eq-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+.eq-stage{position:relative}
+.eqg{display:block;width:100%;height:auto;touch-action:none;background:radial-gradient(circle at 50% 50%,color-mix(in srgb,var(--acc) 9%,var(--bg)),var(--bg) 78%);border:1px solid var(--line);border-radius:14px;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+.eqg.off{opacity:.42;filter:grayscale(.5)}
+.eqg .gl{stroke:color-mix(in srgb,var(--line) 85%,transparent);stroke-width:1}
+.eqg .z{stroke:color-mix(in srgb,var(--mute) 75%,transparent);stroke-dasharray:5 4;stroke-width:1.2}
+.eqg .gt{fill:var(--mute);font-size:11px;font-variant-numeric:tabular-nums}
+.eqg .ar{transition:opacity .15s}
+.eqg .cv{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 0 9px color-mix(in srgb,var(--acc) 65%,transparent))}
+.eqg .node{pointer-events:none;transition:r .14s ease,fill .14s ease;filter:drop-shadow(0 2px 6px rgba(0,0,0,.45))}
+.eqg .nt{font-size:11.5px;font-weight:700;text-anchor:middle;pointer-events:none;font-variant-numeric:tabular-nums}
+.eqg .hit{cursor:grab;outline:none}.eqg .hit:active{cursor:grabbing}.eqg .hit:focus-visible{stroke:var(--text);stroke-width:2}
+.eq-hud{position:absolute;top:10px;right:12px;display:inline-flex;align-items:center;gap:8px;padding:5px 11px;border-radius:999px;background:color-mix(in srgb,var(--panel) 88%,#000 12%);border:1px solid var(--line);backdrop-filter:blur(6px);font-size:12px;font-variant-numeric:tabular-nums;pointer-events:none}
+.eq-hud b{color:var(--text)}
+.eq-hud .hud-gain{color:var(--acc);font-weight:700}
+.hud-dot,.bdot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .bands{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(190px,100%),1fr));gap:10px}
-.band{display:flex;flex-direction:column;gap:8px;padding:12px;cursor:pointer;background:var(--bg);border:1px solid var(--line);border-radius:12px}
-.band.sel{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
+.band{display:flex;flex-direction:column;gap:8px;padding:12px;cursor:pointer;background:var(--bg);border:1px solid var(--line);border-radius:12px;transition:border-color .15s,box-shadow .15s,transform .15s}
+.band:hover{border-color:color-mix(in srgb,var(--bcol,var(--acc)) 65%,var(--line))}
+.band.sel{border-color:var(--bcol,var(--acc));box-shadow:0 0 0 1px var(--bcol,var(--acc)),0 8px 22px -12px var(--bcol,var(--acc))}
+.band-head{display:flex;align-items:center;gap:7px}
 .band .sl{grid-template-columns:38px 1fr 62px;gap:6px}
 .band .sl b{grid-column:auto;text-align:right;font-size:12px}
 input:disabled{opacity:.35}
@@ -1201,12 +1547,34 @@ input:disabled{opacity:.35}
 .more>div{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
 .rec{background:#d6453d;border-color:#d6453d;color:#fff}
 .by{margin-left:6px;font-size:.55em;font-weight:500;color:var(--acc);white-space:nowrap}
-/* ---- Kunci, chord, metronom ---- */
+/* ---- Kunci, chord, metronom, chord sheet & latihan ---- */
 .keys{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:10px}
 .kbox{display:flex;flex-direction:column;gap:2px;padding:12px;background:var(--bg);border:1px solid var(--line);border-radius:12px}
 .kbox.act{border-color:var(--acc)}.kbox b{font-size:20px}
+.now-box{display:flex;flex-direction:column;gap:8px;padding:12px;background:var(--bg);border:1px solid var(--line);border-radius:12px}
 .now{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
-.now span{font-size:42px;font-weight:700;line-height:1.1;color:var(--acc);letter-spacing:-.02em}
+.now span{font-size:38px;font-weight:700;line-height:1.1;color:var(--acc);letter-spacing:-.02em}
+.voicing-bar{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--mute);padding-top:6px;border-top:1px dashed var(--line)}
+.voicing-bar b{color:var(--text);font-weight:600}
+.sheet-opts{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+.chord-sheet{display:grid;gap:8px;padding:12px;background:var(--bg);border:1px solid var(--line);border-radius:12px;max-height:260px;overflow:auto}
+.chord-sheet.view-grid{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}
+.chord-sheet.view-timeline{display:flex;flex-wrap:nowrap;overflow-x:auto;max-height:none;align-items:stretch}
+.chord-sheet.view-compact{grid-template-columns:repeat(auto-fill,minmax(94px,1fr));gap:6px}
+.sheet-cell{position:relative;display:flex;align-items:stretch;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;min-width:104px;flex-shrink:0;transition:border-color .15s,transform .15s}
+.sheet-cell.past{opacity:.65}
+.sheet-cell.cur{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 18%,var(--panel));box-shadow:0 0 0 1px var(--acc),0 0 18px -6px var(--acc);opacity:1}
+.sheet-cell.edited::after{content:'';position:absolute;top:5px;right:26px;width:6px;height:6px;border-radius:50%;background:#ffd166}
+.cell-main{flex:1;flex-direction:column;align-items:flex-start;gap:2px;padding:8px 26px 8px 10px;background:transparent;border:0;border-radius:0;text-align:left;box-shadow:none}
+.cell-main:hover:not(:disabled){border-color:transparent;background:color-mix(in srgb,var(--acc) 8%,transparent)}
+.cell-idx{font-size:11px;color:var(--mute);font-variant-numeric:tabular-nums}
+.cell-ch{font-size:16px;font-weight:700;color:var(--text);line-height:1.2}
+.sheet-cell.cur .cell-ch{color:var(--acc)}
+.cell-sub{font-size:11px;color:var(--mute)}
+.cell-edit{position:absolute;top:4px;right:4px;padding:4px;min-height:unset!important;background:transparent;border:0;color:var(--mute);opacity:.75;box-shadow:none}
+.cell-edit:hover:not(:disabled){opacity:1;color:var(--acc)}
+.edit-inline{display:flex;align-items:center;gap:4px;padding:6px;width:100%}
+.mini-in{width:100%;min-width:0;padding:4px 6px;font-size:13px;color:var(--text);background:var(--bg);border:1px solid var(--acc);border-radius:6px}
 .chips{display:flex;gap:6px;flex-wrap:wrap}
 .chips button{flex-direction:column;gap:0;align-items:center;padding:5px 10px;min-width:58px}
 .chips button small{font-size:11px;color:inherit;opacity:.75}
