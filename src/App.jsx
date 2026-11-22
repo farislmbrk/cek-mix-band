@@ -778,37 +778,10 @@ function EqPanel({ bands, setBands, eqOn, setEqOn, scope, setScope, sel, setSel,
         onPointerUp={() => { drag.current = null }}
         onPointerCancel={() => { drag.current = null }}
       >
-        <defs>
-          <linearGradient id="eqSpecGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--acc)" stopOpacity="0.34" />
-            <stop offset="55%" stopColor="var(--acc)" stopOpacity="0.09" />
-            <stop offset="100%" stopColor="var(--acc)" stopOpacity="0.01" />
-          </linearGradient>
-          <linearGradient id="eqCurveGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="#60a5fa" />
-            <stop offset="28%" stopColor="var(--acc)" />
-            <stop offset="62%" stopColor="#34d399" />
-            <stop offset="85%" stopColor="#fbbf24" />
-            <stop offset="100%" stopColor="#fb7185" />
-          </linearGradient>
-          <linearGradient id="eqFillGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--acc)" stopOpacity="0.36" />
-            <stop offset="50%" stopColor="var(--acc)" stopOpacity="0.11" />
-            <stop offset="100%" stopColor="var(--acc)" stopOpacity="0.01" />
-          </linearGradient>
-          <filter id="eqGlow" x="-15%" y="-25%" width="130%" height="150%">
-            <feGaussianBlur stdDeviation="3.2" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-        </defs>
-
         {showSpec && specArea && (
           <>
-            <path d={specArea} fill="url(#eqSpecGrad)" />
-            <path d={specTopLine} fill="none" stroke="color-mix(in srgb,var(--acc) 55%,transparent)" strokeWidth="1.5" strokeLinecap="round" />
+            <path d={specArea} fill="var(--acc)" fillOpacity="0.16" />
+            <path d={specTopLine} fill="none" stroke="var(--acc)" strokeOpacity="0.6" strokeWidth="1.5" strokeLinecap="round" />
           </>
         )}
 
@@ -849,7 +822,7 @@ function EqPanel({ bands, setBands, eqOn, setEqOn, scope, setScope, sel, setSel,
           )
         })}
 
-        <path d={`${line} L${W - 10},${Y(0)} L32,${Y(0)} Z`} fill="url(#eqFillGrad)" className="ar" />
+        <path d={`${line} L${W - 10},${Y(0)} L32,${Y(0)} Z`} fill="var(--acc)" fillOpacity="0.18" className="ar" />
         <path d={line} stroke="url(#eqCurveGrad)" className="cv" filter="url(#eqGlow)" />
 
         {bands.map((b, i) => {
@@ -2517,7 +2490,7 @@ input[type=checkbox]{accent-color:var(--acc);width:16px;height:16px;margin-top:2
 .eq-toolbar .row{flex:1 1 260px}
 .eq-stage{position:relative;width:100%;max-width:100%;overflow:hidden;border-radius:16px}
 .eqg{
-  display:block;width:100%;max-width:100%;height:auto;touch-action:none;
+  display:block;width:100%;max-width:100%;height:auto;touch-action:pan-y;transform:translateZ(0);backface-visibility:hidden;
   background:radial-gradient(680px 220px at 50% 50%,color-mix(in srgb,var(--acc) 10%,transparent),transparent),var(--glass-sub);
   border:1px solid var(--glass-border);border-radius:16px;
 }
@@ -2596,7 +2569,8 @@ input:disabled{opacity:.35}
   .keys{grid-template-columns:minmax(0,1fr)}
 }
 @media(max-width:560px){
-  .app{padding:12px 10px 72px;padding-left:max(10px,env(safe-area-inset-left));padding-right:max(10px,env(safe-area-inset-right))}
+  .app{padding:12px 10px 72px;padding-left:max(10px,env(safe-area-inset-left));padding-right:max(10px,env(safe-area-inset-right));touch-action:manipulation}
+  input,select,textarea{font-size:16px}
   header{padding:11px 13px;gap:10px;margin-bottom:10px;border-radius:16px}
   h1{font-size:17.5px}
   .card{padding:13px;gap:10px;border-radius:16px}
