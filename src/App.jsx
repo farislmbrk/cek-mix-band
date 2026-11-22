@@ -1,896 +1,1213 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import {
-  Play,
-  Pause,
-  Upload,
-  Volume2,
-  Smartphone,
-  Car,
-  Speaker,
-  Headphones,
-  Activity,
-  Sliders,
-  AlertTriangle,
-  CheckCircle2,
-  Edit3,
-  Music,
-  Layers,
-  RotateCcw
-} from 'lucide-react';
+// DIY Studio & Stage Console by. Ares  v4.4  —  Vite + React + lucide-react + Web Audio API
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Play, Pause, Upload, Scissors, Copy, Trash2, Repeat, Download, StickyNote, Mic, Link2 } from 'lucide-react'
 
-const EQ_FREQS = [60, 250, 800, 2500, 6000, 12000];
-const EQ_LABELS = ['60Hz', '250Hz', '800Hz', '2.5kHz', '6kHz', '12kHz'];
-const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+/* ---------- Konstanta ---------- */
+const THEMES = {
+  midnight: { n: 'Midnight Blue', bg: '#0b1220', panel: '#121b2e', line: '#223152', text: '#e6ecf8', mute: '#8a99b8', acc: '#5aa2ff' },
+  crimson: { n: 'Crimson Rock', bg: '#140a0b', panel: '#1e1214', line: '#3a2226', text: '#f6e9e9', mute: '#b39393', acc: '#ff4d4f' },
+  emerald: { n: 'Emerald Studio', bg: '#08130f', panel: '#0f1d17', line: '#1f3a2e', text: '#e4f4ec', mute: '#86a898', acc: '#2fd08a' },
+}
+const BANDS = [['Sub', 20, 60], ['Bass', 60, 250], ['Low-Mid', 250, 2000], ['High-Mid', 2000, 6000], ['Treble', 6000, 16000]]
+const PUNK_TARGET = [-3, 2, 0, 3, 1] // dB relatif terhadap rata-rata spektrum (kurva target punk / alt-rock)
+const DEVICES = {
+  flat: { n: 'Studio Flat', hp: 10, lp: 20000, ls: 0 },
+  phone: { n: 'Speaker HP', hp: 450, lp: 7500, ls: -4 },
+  car: { n: 'Audio Mobil', hp: 30, lp: 12000, ls: 7 },
+  live: { n: 'Sound Live', hp: 70, lp: 9000, ls: 3 },
+}
+const SOLO = { off: [10, 20000], low: [10, 250], mid: [250, 4000], high: [4000, 20000] }
+const MATRIX = { // [outL<-L, outL<-R, outR<-L, outR<-R]
+  stereo: [1, 0, 0, 1], mono: [.5, .5, .5, .5], side: [.5, -.5, .5, -.5],
+}
+// Mode Pemisah Instrumen (kombinasi matriks stereo + filter spektral real-time)
+const STEMS = {
+  full: { n: 'Full Mix', mat: 'stereo', hp: 10, lp: 20000, pkF: 1000, pkG: 0, pkQ: 1 },
+  vocal: { n: 'Vokal / Lead', mat: 'mono', hp: 220, lp: 6500, pkF: 2400, pkG: 4.5, pkQ: 0.9 },
+  bass: { n: 'Bass / Sub', mat: 'mono', hp: 15, lp: 230, pkF: 85, pkG: 4.0, pkQ: 1.1 },
+  drums: { n: 'Drums / Beat', mat: 'stereo', hp: 10, lp: 20000, pkF: 4500, pkG: 5.5, pkQ: 0.7 },
+  guitar: { n: 'Gitar / Side', mat: 'side', hp: 180, lp: 9500, pkF: 1800, pkG: 3.5, pkQ: 0.9 },
+  karaoke: { n: 'Instrumen (Minus Vocal)', mat: 'side', hp: 10, lp: 20000, pkF: 1400, pkG: -4.0, pkQ: 1.2 },
+}
+const CHECKS = [
+  'Master sudah dicek di speaker HP, earphone, dan speaker studio',
+  'Level puncak tidak clipping (di bawah -1 dBTP)',
+  'Loudness mendekati -14 LUFS (acuan streaming)',
+  'Cek mono compatibility (korelasi tidak mendekati -1)',
+  'Intro & outro bersih, tanpa klik atau noise',
+  'Metadata siap: judul, artis, ISRC, tahun rilis',
+  'Cover art 3000×3000 px, format JPG/PNG',
+  'Lirik & kredit penulis lagu sudah final',
+]
 
-const EQ_PRESETS = [
-  { id: 'flat', label: 'Flat (Default)', gains: [0, 0, 0, 0, 0, 0] },
-  { id: 'vocal', label: 'Vocal Clarity', gains: [-2.5, -2.0, 1.5, 4.0, 3.5, 2.0] },
-  { id: 'bass', label: 'Bass Boost', gains: [6.5, 3.5, -1.0, 0, 1.0, 1.5] },
-  { id: 'rock', label: 'Rock Mix', gains: [4.5, -2.0, 1.5, 3.5, 4.0, 3.0] },
-  { id: 'warm', label: 'Warm Studio', gains: [3.0, 2.0, 0.5, -1.5, -2.0, -2.5] },
-  { id: 'air', label: 'Bright & Air', gains: [-1.0, -1.0, 0, 2.0, 4.5, 6.0] }
-];
+const EQ_DEFAULT = [
+  { f: 80, g: 0, q: 0.7, type: 'lowshelf' }, { f: 250, g: 0, q: 1, type: 'peaking' }, { f: 800, g: 0, q: 1, type: 'peaking' },
+  { f: 2500, g: 0, q: 1, type: 'peaking' }, { f: 6000, g: 0, q: 1, type: 'peaking' }, { f: 12000, g: 0, q: 0.7, type: 'highshelf' },
+]
+const EQ_PRESETS = {
+  flat: ['Flat', [0, 0, 0, 0, 0, 0]],
+  punk: ['Punk Boost', [2, 1, -2, 3, 2, 1]],
+  rock: ['Rock Mix', [4.5, -2, 1.5, 3.5, 4, 3]],
+  vocal: ['Vokal Jernih', [-2, -1, -2, 3.5, 2.5, 1]],
+  bass: ['Bass Penuh', [5.5, 3, 0, -1, 0, 0]],
+  smile: ['Smile', [4, 1, -2, -1, 2, 4]],
+}
+const FMIN = 20, FMAX = 20000, GR = 12 // rentang frekuensi (Hz) dan gain (±dB)
+const fmtHz = f => (f >= 1000 ? `${(f / 1000).toFixed(f >= 10000 ? 0 : 1)} kHz` : `${Math.round(f)} Hz`)
+const fx = f => Math.log(f / FMIN) / Math.log(FMAX / FMIN)
 
-const BASIC_CHORD_TEMPLATES = [
-  { suffix: '', intervals: [0, 4, 7] },
-  { suffix: 'm', intervals: [0, 3, 7] },
-  { suffix: '7', intervals: [0, 4, 7, 10] },
-  { suffix: 'maj7', intervals: [0, 4, 7, 11] },
-  { suffix: 'm7', intervals: [0, 3, 7, 10] },
-  { suffix: 'sus4', intervals: [0, 5, 7] },
-  { suffix: 'dim', intervals: [0, 3, 6] }
-];
+let respCtx
+function eqResponse(bands, n = 140) { // kurva respons gabungan semua band (dB)
+  if (!respCtx) respCtx = new OfflineAudioContext(1, 1, 48000)
+  const freqs = new Float32Array(n).map((_, i) => FMIN * Math.pow(FMAX / FMIN, i / (n - 1))), tot = new Float32Array(n)
+  bands.forEach((b, i) => {
+    const f = respCtx.createBiquadFilter(), m = new Float32Array(n), p = new Float32Array(n)
+    f.type = EQ_DEFAULT[i].type; f.frequency.value = b.f; f.gain.value = b.g; f.Q.value = b.q
+    f.getFrequencyResponse(freqs, m, p); m.forEach((v, k) => { tot[k] += 20 * Math.log10(v) })
+  })
+  return { freqs, tot }
+}
 
-const EXTENDED_CHORD_TEMPLATES = [
-  ...BASIC_CHORD_TEMPLATES,
-  { suffix: 'sus2', intervals: [0, 2, 7] },
-  { suffix: '7sus4', intervals: [0, 5, 7, 10] },
-  { suffix: 'add9', intervals: [0, 4, 7, 2] },
-  { suffix: 'm(add9)', intervals: [0, 3, 7, 2] },
-  { suffix: '6', intervals: [0, 4, 7, 9] },
-  { suffix: 'm6', intervals: [0, 3, 7, 9] },
-  { suffix: '9', intervals: [0, 4, 7, 10, 2] },
-  { suffix: 'maj9', intervals: [0, 4, 7, 11, 2] },
-  { suffix: 'm9', intervals: [0, 3, 7, 10, 2] },
-  { suffix: 'dim7', intervals: [0, 3, 6, 9] },
-  { suffix: 'm7b5', intervals: [0, 3, 6, 10] },
-  { suffix: 'aug', intervals: [0, 4, 8] }
-];
+/* ---------- Utilitas ---------- */
+const fmt = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`
+const db = x => (x > 1e-6 ? 20 * Math.log10(x) : -120)
 
+function detectBpm(buf) {
+  const sr = buf.sampleRate, d = buf.getChannelData(0)
+  const n = Math.min(d.length, sr * 60), hop = Math.round(sr / 400), fs = sr / hop
+  const env = []
+  for (let i = 0; i + hop <= n; i += hop) { let s = 0; for (let j = 0; j < hop; j += 2) s += d[i + j] * d[i + j]; env.push(Math.sqrt(s)) }
+  const on = env.map((v, i) => Math.max(0, v - (env[i - 1] || 0)))
+  let best = 0, bestLag = 0
+  for (let lag = Math.floor(fs * 60 / 200); lag <= Math.ceil(fs * 60 / 60); lag++) {
+    let s = 0
+    for (let i = 0; i + lag < on.length; i++) s += on[i] * on[i + lag]
+    s /= on.length - lag
+    if (s > best) { best = s; bestLag = lag }
+  }
+  if (!bestLag) return null
+  let bpm = 60 * fs / bestLag
+  while (bpm < 80) bpm *= 2
+  while (bpm > 190) bpm /= 2
+  return Math.round(bpm)
+}
+
+function estimateLufs(buf) {
+  const d = buf.getChannelData(0); let s = 0, c = 0
+  for (let i = 0; i < d.length; i += 4) { s += d[i] * d[i]; c++ }
+  return db(Math.sqrt(s / c)) - 0.7
+}
+
+function waveformPeaks(buf, N = 600) {
+  const d = buf.getChannelData(0), bk = Math.floor(d.length / N), p = []
+  for (let i = 0; i < N; i++) { let m = 0; for (let j = i * bk; j < (i + 1) * bk; j += 8) m = Math.max(m, Math.abs(d[j])); p.push(m) }
+  return p
+}
+
+function encodeWav(chs, sr) {
+  const len = chs[0].length, nc = chs.length, buf = new ArrayBuffer(44 + len * nc * 2), v = new DataView(buf)
+  const w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)))
+  w(0, 'RIFF'); v.setUint32(4, 36 + len * nc * 2, true); w(8, 'WAVEfmt ')
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, nc, true)
+  v.setUint32(24, sr, true); v.setUint32(28, sr * nc * 2, true); v.setUint16(32, nc * 2, true); v.setUint16(34, 16, true)
+  w(36, 'data'); v.setUint32(40, len * nc * 2, true)
+  let o = 44
+  for (let i = 0; i < len; i++) for (let c = 0; c < nc; c++) { const x = Math.max(-1, Math.min(1, chs[c][i])); v.setInt16(o, x < 0 ? x * 0x8000 : x * 0x7fff, true); o += 2 }
+  return new Blob([buf], { type: 'audio/wav' })
+}
+
+function download(blob, name) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000)
+}
+
+/* ---------- Kunci, chord (akurasi ditingkatkan + akor extended) & pitch shifter ---------- */
+const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+const KP = {
+  maj: [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88],
+  min: [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17],
+}
+const mod12 = n => ((n % 12) + 12) % 12
+const keyName = (k, t = 0) => `${NOTES[mod12(k.root + t)]} ${k.mode === 'maj' ? 'mayor' : 'minor'}`
+const relKey = k => ({ root: k.mode === 'maj' ? (k.root + 9) % 12 : (k.root + 3) % 12, mode: k.mode === 'maj' ? 'min' : 'maj' })
+const tChord = (name, t) => { const m = name.match(/^([A-G]#?)(.*)$/); return m ? NOTES[mod12(NOTES.indexOf(m[1]) + t)] + m[2] : name }
+
+const PITCH_JS = `
+class PitchShift extends AudioWorkletProcessor {
+  static get parameterDescriptors() { return [{ name: 'ratio', defaultValue: 1, minValue: 0.5, maxValue: 2 }] }
+  constructor() { super(); this.W = 3072; this.N = 16384; this.buf = [new Float32Array(this.N), new Float32Array(this.N)]; this.w = 0; this.ph = 0 }
+  rd(c, p) {
+    const N = this.N, B = this.buf[c], pos = this.w - p * this.W, i = Math.floor(pos), f = pos - i
+    const a = B[((i % N) + N) % N], b = B[(((i + 1) % N) + N) % N]
+    return a + (b - a) * f
+  }
+  process(inputs, outputs, params) {
+    const inp = inputs[0], out = outputs[0], r = params.ratio[0]
+    if (!inp.length) return true
+    for (let n = 0; n < out[0].length; n++) {
+      for (let c = 0; c < out.length; c++) this.buf[c][this.w] = (inp[c] || inp[0])[n]
+      const p1 = this.ph, p2 = (this.ph + 0.5) % 1
+      const w1 = 0.5 - 0.5 * Math.cos(2 * Math.PI * p1), w2 = 0.5 - 0.5 * Math.cos(2 * Math.PI * p2)
+      for (let c = 0; c < out.length; c++) out[c][n] = w1 * this.rd(c, p1) + w2 * this.rd(c, p2)
+      this.ph += (1 - r) / this.W
+      this.ph -= Math.floor(this.ph)
+      this.w = (this.w + 1) % this.N
+    }
+    return true
+  }
+}
+registerProcessor('pitch-shift', PitchShift)
+`
+async function attachPitch(e) {
+  const url = URL.createObjectURL(new Blob([PITCH_JS], { type: 'application/javascript' }))
+  await e.ctx.audioWorklet.addModule(url); URL.revokeObjectURL(url)
+  const n = new AudioWorkletNode(e.ctx, 'pitch-shift', { outputChannelCount: [2] })
+  e.pre.connect(n); n.connect(e.shifted); e.pitch = n
+}
+
+function fft(re, im) {
+  const n = re.length
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1
+    for (; j & bit; bit >>= 1) j ^= bit
+    j ^= bit
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]] }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang), h = len >> 1
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0
+      for (let k = 0; k < h; k++) {
+        const a = i + k, b = a + h, xr = re[b] * cr - im[b] * ci, xi = re[b] * ci + im[b] * cr
+        re[b] = re[a] - xr; im[b] = im[a] - xi; re[a] += xr; im[a] += xi
+        const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t
+      }
+    }
+  }
+}
+
+const pearson = (a, b) => {
+  const n = a.length, ma = a.reduce((x, y) => x + y) / n, mb = b.reduce((x, y) => x + y) / n
+  let s = 0, da = 0, dbb = 0
+  for (let i = 0; i < n; i++) { s += (a[i] - ma) * (b[i] - mb); da += (a[i] - ma) ** 2; dbb += (b[i] - mb) ** 2 }
+  return s / Math.sqrt(da * dbb || 1)
+}
+
+const CHORD_SPECS_BASIC = [
+  { suffix: '', iv: [0, 4, 7], w: [1.0, 0.85, 0.92] },
+  { suffix: 'm', iv: [0, 3, 7], w: [1.0, 0.85, 0.92] },
+  { suffix: '7', iv: [0, 4, 7, 10], w: [1.0, 0.8, 0.85, 0.72] },
+  { suffix: 'maj7', iv: [0, 4, 7, 11], w: [1.0, 0.8, 0.85, 0.72] },
+  { suffix: 'm7', iv: [0, 3, 7, 10], w: [1.0, 0.8, 0.85, 0.72] },
+  { suffix: 'sus4', iv: [0, 5, 7], w: [1.0, 0.82, 0.9] },
+  { suffix: 'dim', iv: [0, 3, 6], w: [1.0, 0.82, 0.82] },
+]
+
+const CHORD_SPECS_EXT = [
+  ...CHORD_SPECS_BASIC,
+  { suffix: 'sus2', iv: [0, 2, 7], w: [1.0, 0.82, 0.9] },
+  { suffix: '7sus4', iv: [0, 5, 7, 10], w: [1.0, 0.78, 0.85, 0.7] },
+  { suffix: 'add9', iv: [0, 4, 7, 2], w: [1.0, 0.8, 0.85, 0.68] },
+  { suffix: 'm(add9)', iv: [0, 3, 7, 2], w: [1.0, 0.8, 0.85, 0.68] },
+  { suffix: '6', iv: [0, 4, 7, 9], w: [1.0, 0.78, 0.84, 0.66] },
+  { suffix: 'm6', iv: [0, 3, 7, 9], w: [1.0, 0.78, 0.84, 0.66] },
+  { suffix: '9', iv: [0, 4, 7, 10, 2], w: [1.0, 0.75, 0.8, 0.65, 0.62] },
+  { suffix: 'maj9', iv: [0, 4, 7, 11, 2], w: [1.0, 0.75, 0.8, 0.65, 0.62] },
+  { suffix: 'm9', iv: [0, 3, 7, 10, 2], w: [1.0, 0.75, 0.8, 0.65, 0.62] },
+  { suffix: 'dim7', iv: [0, 3, 6, 9], w: [1.0, 0.78, 0.78, 0.7] },
+  { suffix: 'm7b5', iv: [0, 3, 6, 10], w: [1.0, 0.78, 0.78, 0.7] },
+  { suffix: 'aug', iv: [0, 4, 8], w: [1.0, 0.84, 0.84] },
+]
+
+function buildTemplates(specs) {
+  return specs.flatMap(sp => NOTES.map((_, r) => {
+    const t = new Array(12).fill(0)
+    sp.iv.forEach((x, j) => { t[(r + x) % 12] = sp.w[j] })
+    const penalty = sp.iv.length > 3 ? (sp.iv.length - 3) * 0.032 : 0
+    return { name: NOTES[r] + sp.suffix, root: r, fifth: (r + 7) % 12, t, n: Math.hypot(...t), penalty }
+  }))
+}
+
+const TPL_BASIC = buildTemplates(CHORD_SPECS_BASIC)
+const TPL_EXT = buildTemplates(CHORD_SPECS_EXT)
+
+function analyzeHarmony(buf, chordMode = 'extended') {
+  const D = 4, sr = buf.sampleRate / D, N = 8192, hop = 4096
+  const c0 = buf.getChannelData(0), c1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : c0
+  const len = Math.floor(c0.length / D), mono = new Float32Array(len)
+  for (let i = 0; i < len; i++) { let s = 0; for (let k = 0; k < D; k++) s += c0[i * D + k] + c1[i * D + k]; mono[i] = s / (2 * D) }
+
+  // Estimasi micro-tuning (A4 offset) agar deteksi pitch class tetap akurat walau tuning sedikit bergeser
+  const lo = Math.ceil(65 * N / sr), hi = Math.floor(2200 * N / sr)
+  const bassHi = Math.floor(240 * N / sr)
+  const win = Float32Array.from({ length: N }, (_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N))
+  const re = new Float64Array(N), im = new Float64Array(N), total = new Array(12).fill(0), rawFrames = []
+
+  for (let s = 0; s + N <= len; s += hop) {
+    for (let i = 0; i < N; i++) { re[i] = mono[s + i] * win[i]; im[i] = 0 }
+    fft(re, im)
+
+    const ch = new Array(12).fill(0)
+    const bassCh = new Array(12).fill(0)
+    let e = 0
+
+    for (let k = lo; k <= hi; k++) {
+      const mag = Math.hypot(re[k], im[k])
+      if (mag < 1e-4) continue
+      const freq = (k * sr) / N
+      const midi = 12 * Math.log2(freq / 440) + 69
+      const pc = mod12(Math.round(midi))
+      // Beri bobot lebih pada rentang fundamental & harmonic rendah (100-700 Hz), redam overtone tinggi
+      const fWeight = freq < 320 ? 1.35 : freq < 850 ? 1.0 : 0.62
+      const val = Math.pow(mag, 0.65) * fWeight
+      ch[pc] += val
+      e += val
+      if (k <= bassHi) bassCh[pc] += val * 1.5
+    }
+
+    if (e < 0.5) { rawFrames.push(null); continue }
+    const norm = ch.map(v => v / e)
+    norm.forEach((v, i) => { total[i] += v })
+
+    let bassPc = 0
+    for (let i = 1; i < 12; i++) if (bassCh[i] > bassCh[bassPc]) bassPc = i
+
+    rawFrames.push({ t: Math.max(0, (s + N / 2) / sr - 0.19), ch: norm, bassPc })
+  }
+
+  // Smoothing temporal antar frame (EMA) untuk mengurangi lonjakan akibat transient perkusi/gitar
+  const frames = rawFrames.map((f, idx) => {
+    if (!f) return null
+    const prev = rawFrames[idx - 1]?.ch || f.ch
+    const next = rawFrames[idx + 1]?.ch || f.ch
+    const smCh = f.ch.map((v, pc) => 0.25 * prev[pc] + 0.5 * v + 0.25 * next[pc])
+    return { ...f, ch: smCh }
+  })
+
+  let key = { root: 0, mode: 'maj', conf: 'rendah' }, bestR = -2
+  if (frames.some(Boolean)) {
+    for (const mode of ['maj', 'min']) for (let r = 0; r < 12; r++) {
+      const c = pearson(total, total.map((_, i) => KP[mode][mod12(i - r)]))
+      if (c > bestR) { bestR = c; key = { root: r, mode } }
+    }
+    key.conf = bestR > 0.75 ? 'tinggi' : bestR > 0.6 ? 'sedang' : 'rendah'
+  }
+
+  const tplList = chordMode === 'basic' ? TPL_BASIC : TPL_EXT
+  const lab = frames.map(f => {
+    if (!f) return -1
+    let best = -1, bs = -Infinity
+    const cn = Math.hypot(...f.ch) || 1
+    tplList.forEach((c, i) => {
+      let d = 0
+      for (let k = 0; k < 12; k++) d += f.ch[k] * c.t[k]
+      // Bonus root/bass note untuk menghindari salah baca inversi (misal C/E terbaca Em)
+      const bassBoost = f.bassPc === c.root ? 0.11 : f.bassPc === c.fifth ? 0.04 : 0
+      const score = (d / (cn * c.n)) + bassBoost - c.penalty
+      if (score > bs) { bs = score; best = i }
+    })
+    return best
+  })
+
+  // Filter median 3-frame untuk menghilangkan kedipan 1-frame yang salah
+  const sm = lab.map((l, i) => (i && i < lab.length - 1 && lab[i - 1] === lab[i + 1] ? lab[i - 1] : l))
+  const runs = []
+  sm.forEach((l, i) => {
+    const last = runs[runs.length - 1]
+    if (last && last.l === l) last.n++
+    else runs.push({ l, n: 1, t: frames[i]?.t ?? 0 })
+  })
+  const chords = []
+  runs.filter(r => r.l >= 0 && (r.n >= 2 || runs.length === 1)).forEach(r => {
+    const name = tplList[r.l].name
+    if (!chords.length || chords[chords.length - 1].name !== name) chords.push({ t: r.t, name })
+  })
+  return { key, chords }
+}
+
+/* ---------- Audio engine ---------- */
+function createEngine() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'playback' })
+  const bq = (type, f, q = 0.707) => { const x = ctx.createBiquadFilter(); x.type = type; x.frequency.value = f; x.Q.value = q; return x }
+  const mkEq = () => { const c = EQ_DEFAULT.map(b => bq(b.type, b.f, b.q)); c.forEach((n, i) => { if (i) c[i - 1].connect(n) }); return c }
+  const eqA = mkEq(), eqB = mkEq()
+  const gA = ctx.createGain(), gB = ctx.createGain(), bus = ctx.createGain()
+  eqA[5].connect(gA); eqB[5].connect(gB)
+  const pre = ctx.createGain(), direct = ctx.createGain(), shifted = ctx.createGain()
+  shifted.gain.value = 0
+  gA.connect(pre); gB.connect(pre); pre.connect(direct); direct.connect(bus); shifted.connect(bus)
+
+  // analisis stereo (korelasi) — pre monitor
+  const sp = ctx.createChannelSplitter(2), anL = ctx.createAnalyser(), anR = ctx.createAnalyser()
+  anL.fftSize = anR.fftSize = 2048
+  bus.connect(sp); sp.connect(anL, 0); sp.connect(anR, 1)
+
+  // matriks kanal (Stereo / Mono / Side / Vocal Remover / Pemisah Instrumen)
+  const sp2 = ctx.createChannelSplitter(2), mg = ctx.createChannelMerger(2), mx = []
+  bus.connect(sp2)
+  for (let o = 0; o < 2; o++) for (let i = 0; i < 2; i++) { const g = ctx.createGain(); sp2.connect(g, i); g.connect(mg, 0, o); mx.push(g) }
+
+  // pemisah instrumen (stem filter) -> solo band -> simulasi perangkat -> analyser -> master
+  const stHp = bq('highpass', 10), stLp = bq('lowpass', 20000), stPk = bq('peaking', 1000, 1)
+  const sHp = bq('highpass', 10), sLp = bq('lowpass', 20000), dHp = bq('highpass', 10), dLp = bq('lowpass', 20000), dLs = bq('lowshelf', 120)
+  const an = ctx.createAnalyser(); an.fftSize = 4096; an.smoothingTimeConstant = 0.8
+  const master = ctx.createGain()
+  mg.connect(stHp); stHp.connect(stLp); stLp.connect(stPk); stPk.connect(sHp)
+  sHp.connect(sLp); sLp.connect(dHp); dHp.connect(dLp); dLp.connect(dLs); dLs.connect(an); an.connect(master)
+
+  const outVol = ctx.createGain(), limDirect = ctx.createGain(), limComp = ctx.createGain(), comp = ctx.createDynamicsCompressor()
+  comp.threshold.value = -6; comp.knee.value = 0; comp.ratio.value = 20; comp.attack.value = 0.002; comp.release.value = 0.15
+  limDirect.gain.value = 0
+  master.connect(outVol); outVol.connect(limDirect); limDirect.connect(ctx.destination)
+  outVol.connect(comp); comp.connect(limComp); limComp.connect(ctx.destination)
+
+  // ambient noise
+  const nb = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), nd = nb.getChannelData(0)
+  for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1
+  const ns = ctx.createBufferSource(); ns.buffer = nb; ns.loop = true
+  const nFilter = bq('bandpass', 1400, 0.35), nGain = ctx.createGain(), lfo = ctx.createOscillator(), lfoG = ctx.createGain()
+  nGain.gain.value = 0; lfo.frequency.value = 0.25
+  ns.connect(nFilter); nFilter.connect(nGain); nGain.connect(ctx.destination)
+  lfo.connect(lfoG); lfoG.connect(nGain.gain); ns.start(); lfo.start()
+
+  master.gain.value = 1
+  return { ctx, pre, direct, shifted, outVol, limDirect, limComp, eqA, eqB, gA, gB, master, mx, anL, anR, an, stHp, stLp, stPk, sHp, sLp, dHp, dLp, dLs, nFilter, nGain, lfoG }
+}
+
+/* ---------- Komponen kecil ---------- */
+const Card = ({ title, children, wide }) => (
+  <section className={`card${wide ? ' wide' : ''}`}><h2>{title}</h2>{children}</section>
+)
+const Slider = ({ label, value, onChange, min = 0, max = 1, step = 0.01, show, disabled }) => (
+  <label className="sl"><span>{label}</span>
+    <input type="range" min={min} max={max} step={step} value={value} disabled={disabled} onChange={e => onChange(+e.target.value)}
+      style={{ '--p': `${((value - min) / (max - min)) * 100}%` }} />
+    <b>{show ?? value}</b></label>
+)
+const Seg = ({ value, options, onChange }) => (
+  <div className="seg">{options.map(([k, l]) => <button key={k} className={value === k ? 'on' : ''} onClick={() => onChange(k)}>{l}</button>)}</div>
+)
+
+function EqPanel({ bands, setBands, eqOn, setEqOn, scope, setScope, sel, setSel, flash, specCurve }) {
+  const W = 720, H = 280
+  const svg = useRef(null), drag = useRef(null)
+  const X = f => fx(f) * W, Y = g => H / 2 - (g / GR) * (H / 2)
+  const upd = (i, p) => setBands(b => b.map((x, j) => (j === i ? { ...x, ...p } : x)))
+  const { freqs, tot } = useMemo(() => eqResponse(bands), [bands])
+  const line = 'M' + Array.from(freqs, (f, k) => `${X(f).toFixed(1)},${Y(Math.max(-GR, Math.min(GR, tot[k]))).toFixed(1)}`).join('L')
+
+  // Grafik spektrum audio real-time yang mengikuti lagu di belakang kurva EQ
+  const specArea = useMemo(() => {
+    if (!specCurve || !specCurve.length) return `M0,${H} L${W},${H} Z`
+    const pts = specCurve.map((val, idx) => {
+      const x = (idx / (specCurve.length - 1)) * W
+      const y = H - Math.max(0, Math.min(1, val)) * (H - 12)
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    return `M0,${H} L${pts.join(' L')} L${W},${H} Z`
+  }, [specCurve])
+
+  const move = e => {
+    if (drag.current == null) return
+    const r = svg.current.getBoundingClientRect()
+    const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)), y = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height))
+    upd(drag.current, { f: Math.round(FMIN * Math.pow(FMAX / FMIN, x)), g: Math.round((GR - y * 2 * GR) * 10) / 10 })
+  }
+  const key = (e, i) => {
+    const b = bands[i], k = e.key
+    if (k === 'ArrowUp') upd(i, { g: Math.min(GR, b.g + 0.5) })
+    else if (k === 'ArrowDown') upd(i, { g: Math.max(-GR, b.g - 0.5) })
+    else if (k === 'ArrowLeft') upd(i, { f: Math.max(FMIN, Math.round(b.f / 1.05)) })
+    else if (k === 'ArrowRight') upd(i, { f: Math.min(FMAX, Math.round(b.f * 1.05)) })
+    else return
+    e.preventDefault()
+  }
+  const saveMine = () => { try { localStorage.setItem('cmb-eq', JSON.stringify(bands)); flash('Preset EQ disimpan') } catch { flash('Gagal menyimpan') } }
+  const loadMine = () => {
+    try {
+      const b = JSON.parse(localStorage.getItem('cmb-eq'))
+      if (!Array.isArray(b) || b.length !== 6) throw 0
+      setBands(EQ_DEFAULT.map((d, i) => ({ ...d, f: +b[i].f || d.f, g: +b[i].g || 0, q: +b[i].q || d.q }))); flash('Preset EQ dimuat')
+    } catch { flash('Belum ada preset tersimpan') }
+  }
+  return (<>
+    <div className="row">
+      <button className={eqOn ? 'on' : ''} onClick={() => setEqOn(!eqOn)}>{eqOn ? 'EQ ON' : 'EQ OFF'}</button>
+      <small>Terapkan ke</small>
+      <Seg value={scope} onChange={setScope} options={[['A', 'Track A'], ['B', 'Track B'], ['AB', 'Keduanya']]} />
+    </div>
+    <svg ref={svg} viewBox={`0 0 ${W} ${H}`} className={`eqg${eqOn ? '' : ' off'}`} onPointerMove={move}
+      onPointerUp={() => { drag.current = null }} onPointerCancel={() => { drag.current = null }}>
+      <defs>
+        <linearGradient id="eqSpecGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="var(--acc)" stopOpacity="0.34" />
+          <stop offset="100%" stopColor="var(--acc)" stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+      {/* Grafik spektrum real-time di belakang grid dan kurva EQ */}
+      <path d={specArea} fill="url(#eqSpecGrad)" />
+      {[50, 100, 200, 500, 1000, 2000, 5000, 10000].map(f => (
+        <g key={f}><line x1={X(f)} x2={X(f)} y1="0" y2={H} className="gl" /><text x={X(f) + 3} y={H - 5} className="gt">{f >= 1000 ? f / 1000 + 'k' : f}</text></g>))}
+      {[-12, -6, 0, 6, 12].map(g => (
+        <g key={g}><line x1="0" x2={W} y1={Y(g)} y2={Y(g)} className={g === 0 ? 'gl z' : 'gl'} /><text x="4" y={Y(g) - 3} className="gt">{g > 0 ? '+' + g : g}</text></g>))}
+      <path d={`${line}L${W},${Y(0)}L0,${Y(0)}Z`} className="ar" />
+      <path d={line} className="cv" />
+      {bands.map((b, i) => (
+        <g key={i}>
+          <circle cx={X(b.f)} cy={Y(b.g)} r={sel === i ? 14 : 11} className={`node${sel === i ? ' sel' : ''}`} />
+          <text className={`nt${sel === i ? ' sel' : ''}`} x={X(b.f)} y={Y(b.g) + 4}>{i + 1}</text>
+          <circle cx={X(b.f)} cy={Y(b.g)} r="26" fill="transparent" className="hit" tabIndex={0} role="slider"
+            aria-label={`Band ${i + 1}: ${fmtHz(b.f)}, ${b.g} dB`} aria-valuenow={b.g}
+            onPointerDown={e => { e.preventDefault(); drag.current = i; setSel(i); svg.current.setPointerCapture(e.pointerId) }}
+            onFocus={() => setSel(i)} onKeyDown={e => key(e, i)} onDoubleClick={() => upd(i, { g: 0 })} />
+        </g>))}
+    </svg>
+    <small className="hint">Geser titik: kiri-kanan mengatur frekuensi, atas-bawah mengatur gain. Grafik biru di belakang kurva mengikuti spektrum audio secara real-time. Klik dua kali untuk mengembalikan gain band itu ke 0.</small>
+    <div className="bands">
+      {bands.map((b, i) => (
+        <div key={i} className={`band${sel === i ? ' sel' : ''}`} onClick={() => setSel(i)}>
+          <b>Band {i + 1} · {fmtHz(b.f)}</b>
+          <Slider label="Freq" min={0} max={1} step={0.002} value={fx(b.f)} show={fmtHz(b.f)}
+            onChange={v => upd(i, { f: Math.round(FMIN * Math.pow(FMAX / FMIN, v)) })} />
+          <Slider label="Gain" min={-GR} max={GR} step={0.5} value={b.g} show={`${b.g > 0 ? '+' : ''}${b.g} dB`} onChange={v => upd(i, { g: v })} />
+          <Slider label="Q" min={0.3} max={6} step={0.1} value={b.q} show={EQ_DEFAULT[i].type === 'peaking' ? b.q.toFixed(1) : 'tetap'}
+            disabled={EQ_DEFAULT[i].type !== 'peaking'} onChange={v => upd(i, { q: v })} />
+        </div>))}
+    </div>
+    <div className="row">
+      <small>Preset</small>
+      {Object.entries(EQ_PRESETS).map(([k, [n, g]]) => (
+        <button key={k} onClick={() => setBands(EQ_DEFAULT.map((d, i) => ({ ...d, g: g[i] })))}>{n}</button>))}
+      <button onClick={saveMine}>Simpan preset saya</button>
+      <button onClick={loadMine}>Muat preset saya</button>
+      <button onClick={() => setBands(EQ_DEFAULT)}>Reset</button>
+    </div>
+  </>)
+}
+
+/* ---------- App ---------- */
 export default function App() {
-  const [bandName, setBandName] = useState(() => localStorage.getItem('bandName') || 'DIY STUDIO CONSOLE');
-  const [isEditingName, setIsEditingName] = useState(false);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [activeTrack, setActiveTrack] = useState('A');
-  const [isMono, setIsMono] = useState(false);
-  const [deviceMode, setDeviceMode] = useState('studio');
-  const [trackAName, setTrackAName] = useState('Belum ada file Mix Band');
-  const [trackBName, setTrackBName] = useState('Belum ada file Referensi');
-  const [gainA, setGainA] = useState(1.0);
-  const [gainB, setGainB] = useState(0.85);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [freqBars, setFreqBars] = useState([12, 12, 12, 12, 12]);
-  const [peakDb, setPeakDb] = useState(-60);
+  const [theme, setTheme] = useState('midnight')
+  const [tab, setTab] = useState(1)
+  const [ready, setReady] = useState(false)
+  const [files, setFiles] = useState({ A: null, B: null })
+  const [active, setActive] = useState('A')
+  const [playing, setPlaying] = useState(false)
+  const [pos, setPos] = useState(0)
+  const [vol, setVol] = useState({ A: 0.4, B: 0.4 })
+  const [loop, setLoop] = useState({ a: null, b: null, on: false })
+  const [rate, setRate] = useState(1)
+  const [bands, setBands] = useState(EQ_DEFAULT)
+  const [eqOn, setEqOn] = useState(true)
+  const [eqScope, setEqScope] = useState('A')
+  const [selBand, setSelBand] = useState(0)
+  const [specCurve, setSpecCurve] = useState(() => new Array(64).fill(0))
+  const [urls, setUrls] = useState({ A: '', B: '' })
+  const [recSlot, setRecSlot] = useState(null)
+  const [tr, setTr] = useState({ A: 0, B: 0 })
+  const [chordMode, setChordMode] = useState('extended') // 'basic' | 'extended'
+  const [stemMode, setStemMode] = useState('full') // fitur pemisah instrumen
+  const [keepPitch, setKeepPitch] = useState(true)
+  const [pitchOk, setPitchOk] = useState(false)
+  const [outVol, setOutVol] = useState(1)
+  const [limiter, setLimiter] = useState(true)
+  const [met, setMet] = useState({ on: false, bpm: 120, vol: 0.5 })
+  const taps = useRef([]), keyRef = useRef(null)
+  const [device, setDevice] = useState('flat')
+  const [solo, setSolo] = useState('off')
+  const [ch, setCh] = useState('stereo')
+  const [vocalRm, setVocalRm] = useState(false)
+  const [spot, setSpot] = useState(false)
+  const [noise, setNoise] = useState({ mode: 'off', level: 0.4 })
+  const [punk, setPunk] = useState(false)
+  const [meters, setMeters] = useState({ bands: [-90, -90, -90, -90, -90], peak: -120, corr: 0 })
+  const [notes, setNotes] = useState([])
+  const [noteText, setNoteText] = useState('')
+  const [promoLen, setPromoLen] = useState(30)
+  const [promoStart, setPromoStart] = useState(null)
+  const [checks, setChecks] = useState(() => { try { return JSON.parse(localStorage.getItem('cmb-checks')) || [] } catch { return [] } })
+  const [msg, setMsg] = useState('')
+  const [vw, setVw] = useState(0)
 
-  // Fitur 1: Pemisah Instrumen (Stem / Band Isolator)
-  const [stemMode, setStemMode] = useState('full');
+  const rec = useRef(null), eng = useRef(null), ps = useRef({ src: null, off: 0, t: 0, rate: 1 }), posRef = useRef(0)
+  const S = useRef({}), smooth = useRef([-90, -90, -90, -90, -90]), canvas = useRef(null), seekEl = useRef(null)
+  S.current = { ...S.current, files, active, loop, rate, playing }
 
-  // Fitur 2: Deteksi Chord dengan Opsi Mode Akor (Dasar vs Extended)
-  const [chordComplexity, setChordComplexity] = useState('extended'); // 'basic' | 'extended'
-  const [chordInfo, setChordInfo] = useState({
-    chord: '--',
-    confidence: 0,
-    bassNote: '--',
-    keyEstimate: '--'
-  });
+  const ensure = () => {
+    if (!eng.current) { eng.current = createEngine(); setReady(true); attachPitch(eng.current).then(() => setPitchOk(true)).catch(() => {}) }
+    if (eng.current.ctx.state === 'suspended') eng.current.ctx.resume()
+    return eng.current
+  }
+  const setP = v => { posRef.current = v; setPos(v) }
+  const flash = t => { setMsg(t); setTimeout(() => setMsg(''), 2200) }
+  const cur = files[active]
+  const dur = cur?.buf.duration || 0
+  const loopOk = l => l.a != null && l.b != null && l.b > l.a
 
-  // Fitur 3: Equalizer 6-Band + Preset EQ + Grafik Spektrum di Belakang Kurva
-  const [eqGains, setEqGains] = useState([0, 0, 0, 0, 0, 0]);
-  const [activeEqPreset, setActiveEqPreset] = useState('flat');
-  const [spectrumCurve, setSpectrumCurve] = useState(() => Array(48).fill(0));
-
-  const audioCtxRef = useRef(null);
-  const bufferARef = useRef(null);
-  const bufferBRef = useRef(null);
-  const sourceRef = useRef(null);
-  const gainNodeRef = useRef(null);
-  const analyserRef = useRef(null);
-  const filterLowRef = useRef(null);
-  const filterHighRef = useRef(null);
-  const stemFilterRef = useRef(null);
-  const eqNodesRef = useRef([]);
-  const animRef = useRef(null);
-  const startTimeRef = useRef(0);
-  const offsetRef = useRef(0);
-
-  const chromaHistoryRef = useRef(Array(12).fill(0));
-  const chordCandidateRef = useRef({ label: '--', count: 0 });
-  const keyHistogramRef = useRef(Array(12).fill(0));
-  const chordComplexityRef = useRef(chordComplexity);
-
-  useEffect(() => {
-    chordComplexityRef.current = chordComplexity;
-  }, [chordComplexity]);
-
-  const initAudio = () => {
-    if (!audioCtxRef.current) {
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      const ctx = new AudioContext();
-      audioCtxRef.current = ctx;
-
-      analyserRef.current = ctx.createAnalyser();
-      analyserRef.current.fftSize = 2048;
-      analyserRef.current.smoothingTimeConstant = 0.78;
-
-      gainNodeRef.current = ctx.createGain();
-      filterLowRef.current = ctx.createBiquadFilter();
-      filterHighRef.current = ctx.createBiquadFilter();
-      stemFilterRef.current = ctx.createBiquadFilter();
-
-      eqNodesRef.current = EQ_FREQS.map((freq, idx) => {
-        const node = ctx.createBiquadFilter();
-        node.frequency.setValueAtTime(freq, ctx.currentTime);
-        if (idx === 0) node.type = 'lowshelf';
-        else if (idx === EQ_FREQS.length - 1) node.type = 'highshelf';
-        else {
-          node.type = 'peaking';
-          node.Q.setValueAtTime(1.4, ctx.currentTime);
-        }
-        node.gain.setValueAtTime(eqGains[idx] || 0, ctx.currentTime);
-        return node;
-      });
-    }
-    if (audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume();
-    }
-  };
-
-  const handleFileUpload = async (e, track) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    initAudio();
-    const arrayBuffer = await file.arrayBuffer();
-    const audioBuffer = await audioCtxRef.current.decodeAudioData(arrayBuffer);
-    chromaHistoryRef.current = Array(12).fill(0);
-    keyHistogramRef.current = Array(12).fill(0);
-
-    if (track === 'A') {
-      bufferARef.current = audioBuffer;
-      setTrackAName(file.name);
-      if (activeTrack === 'A') setDuration(audioBuffer.duration);
-    } else {
-      bufferBRef.current = audioBuffer;
-      setTrackBName(file.name);
-      if (activeTrack === 'B') setDuration(audioBuffer.duration);
-    }
-  };
-
-  useEffect(() => {
-    if (gainNodeRef.current && audioCtxRef.current) {
-      const val = activeTrack === 'A' ? gainA : gainB;
-      gainNodeRef.current.gain.setValueAtTime(val, audioCtxRef.current.currentTime);
-    }
-  }, [gainA, gainB, activeTrack]);
-
-  useEffect(() => {
-    if (!filterLowRef.current || !filterHighRef.current || !audioCtxRef.current) return;
-    const ctx = audioCtxRef.current;
-    if (deviceMode === 'phone') {
-      filterLowRef.current.type = 'highpass';
-      filterLowRef.current.frequency.setValueAtTime(320, ctx.currentTime);
-      filterLowRef.current.gain.setValueAtTime(0, ctx.currentTime);
-      filterHighRef.current.type = 'lowpass';
-      filterHighRef.current.frequency.setValueAtTime(3800, ctx.currentTime);
-      filterHighRef.current.gain.setValueAtTime(0, ctx.currentTime);
-    } else if (deviceMode === 'car') {
-      filterLowRef.current.type = 'peaking';
-      filterLowRef.current.frequency.setValueAtTime(110, ctx.currentTime);
-      filterLowRef.current.gain.setValueAtTime(6, ctx.currentTime);
-      filterHighRef.current.type = 'lowpass';
-      filterHighRef.current.frequency.setValueAtTime(11000, ctx.currentTime);
-      filterHighRef.current.gain.setValueAtTime(0, ctx.currentTime);
-    } else if (deviceMode === 'club') {
-      filterLowRef.current.type = 'lowshelf';
-      filterLowRef.current.frequency.setValueAtTime(80, ctx.currentTime);
-      filterLowRef.current.gain.setValueAtTime(8, ctx.currentTime);
-      filterHighRef.current.type = 'allpass';
-      filterHighRef.current.gain.setValueAtTime(0, ctx.currentTime);
-    } else {
-      filterLowRef.current.type = 'allpass';
-      filterLowRef.current.gain.setValueAtTime(0, ctx.currentTime);
-      filterHighRef.current.type = 'allpass';
-      filterHighRef.current.gain.setValueAtTime(0, ctx.currentTime);
-    }
-  }, [deviceMode]);
-
-  useEffect(() => {
-    if (!stemFilterRef.current || !audioCtxRef.current) return;
-    const ctx = audioCtxRef.current;
-    const f = stemFilterRef.current;
-    f.Q.setValueAtTime(1.2, ctx.currentTime);
-
-    if (stemMode === 'vocal') {
-      f.type = 'bandpass';
-      f.frequency.setValueAtTime(1250, ctx.currentTime);
-      f.Q.setValueAtTime(0.85, ctx.currentTime);
-      f.gain.setValueAtTime(0, ctx.currentTime);
-    } else if (stemMode === 'bass') {
-      f.type = 'lowpass';
-      f.frequency.setValueAtTime(220, ctx.currentTime);
-      f.gain.setValueAtTime(3, ctx.currentTime);
-    } else if (stemMode === 'drums') {
-      f.type = 'peaking';
-      f.frequency.setValueAtTime(4200, ctx.currentTime);
-      f.Q.setValueAtTime(0.7, ctx.currentTime);
-      f.gain.setValueAtTime(5, ctx.currentTime);
-    } else if (stemMode === 'karaoke') {
-      f.type = 'notch';
-      f.frequency.setValueAtTime(1400, ctx.currentTime);
-      f.Q.setValueAtTime(1.5, ctx.currentTime);
-      f.gain.setValueAtTime(0, ctx.currentTime);
-    } else {
-      f.type = 'allpass';
-      f.gain.setValueAtTime(0, ctx.currentTime);
-    }
-  }, [stemMode]);
-
-  useEffect(() => {
-    if (!audioCtxRef.current || !eqNodesRef.current.length) return;
-    const ctx = audioCtxRef.current;
-    eqNodesRef.current.forEach((node, idx) => {
-      node.gain.setTargetAtTime(eqGains[idx] || 0, ctx.currentTime, 0.02);
-    });
-  }, [eqGains]);
-
-  useEffect(() => {
-    if (sourceRef.current) {
-      sourceRef.current.channelCount = isMono ? 1 : 2;
-      sourceRef.current.channelCountMode = isMono ? 'explicit' : 'max';
-    }
-  }, [isMono]);
-
-  const stopAudio = () => {
-    if (sourceRef.current) {
-      try { sourceRef.current.stop(); } catch (e) {}
-      sourceRef.current.disconnect();
-      sourceRef.current = null;
-    }
-    cancelAnimationFrame(animRef.current);
-  };
-
-  const detectChordFromFFT = useCallback((freqData, sampleRate, fftSize) => {
-    const binHz = sampleRate / fftSize;
-    const rawChroma = Array(12).fill(0);
-    const bassChroma = Array(12).fill(0);
-
-    const minBin = Math.max(2, Math.floor(65 / binHz));
-    const maxBin = Math.min(freqData.length - 1, Math.ceil(2200 / binHz));
-
-    for (let i = minBin; i <= maxBin; i++) {
-      const mag = freqData[i] / 255;
-      if (mag < 0.14) continue;
-
-      const freq = i * binHz;
-      const midi = 69 + 12 * Math.log2(freq / 440);
-      if (!Number.isFinite(midi)) continue;
-
-      const pitchClass = ((Math.round(midi) % 12) + 12) % 12;
-      const freqWeight = freq < 320 ? 1.35 : freq < 900 ? 1.0 : 0.65;
-      const energy = (mag * mag) * freqWeight;
-
-      rawChroma[pitchClass] += energy;
-      if (freq >= 65 && freq <= 240) {
-        bassChroma[pitchClass] += energy * 1.6;
-      }
-    }
-
-    const totalEnergy = rawChroma.reduce((a, b) => a + b, 0);
-    if (totalEnergy < 0.08) {
-      return null;
-    }
-
-    const normChroma = rawChroma.map((v) => v / totalEnergy);
-    const alpha = 0.35;
-    const smoothed = chromaHistoryRef.current.map((prev, idx) => {
-      const nextVal = prev * (1 - alpha) + normChroma[idx] * alpha;
-      chromaHistoryRef.current[idx] = nextVal;
-      return nextVal;
-    });
-
-    let bassIdx = 0;
-    for (let i = 1; i < 12; i++) {
-      if (bassChroma[i] > bassChroma[bassIdx]) bassIdx = i;
-    }
-
-    smoothed.forEach((val, idx) => {
-      keyHistogramRef.current[idx] += val * 0.05;
-    });
-    let keyIdx = 0;
-    for (let i = 1; i < 12; i++) {
-      if (keyHistogramRef.current[i] > keyHistogramRef.current[keyIdx]) keyIdx = i;
-    }
-
-    const templates =
-      chordComplexityRef.current === 'extended'
-        ? EXTENDED_CHORD_TEMPLATES
-        : BASIC_CHORD_TEMPLATES;
-
-    let bestScore = -Infinity;
-    let bestChord = '--';
-
-    for (let root = 0; root < 12; root++) {
-      for (const tpl of templates) {
-        const chordPcs = new Set(tpl.intervals.map((iv) => (root + iv) % 12));
-        let inChordScore = 0;
-        let outChordPenalty = 0;
-
-        for (let pc = 0; pc < 12; pc++) {
-          if (chordPcs.has(pc)) {
-            inChordScore += smoothed[pc];
-          } else {
-            outChordPenalty += smoothed[pc] * 0.55;
-          }
-        }
-
-        // Sedikit penalti kompleksitas untuk akor 4-5 nada agar tidak overfit saat triad murni dimainkan
-        const complexityPenalty = tpl.intervals.length > 3 ? (tpl.intervals.length - 3) * 0.035 : 0;
-
-        const fifthPc = (root + 7) % 12;
-        let bassBonus = 0;
-        if (bassIdx === root) bassBonus = 0.14;
-        else if (bassIdx === fifthPc) bassBonus = 0.06;
-
-        const score = inChordScore - outChordPenalty - complexityPenalty + bassBonus;
-        if (score > bestScore) {
-          bestScore = score;
-          bestChord = `${NOTE_NAMES[root]}${tpl.suffix}`;
-        }
-      }
-    }
-
-    const confidence = Math.max(0, Math.min(100, Math.round((bestScore + 0.2) * 85)));
-    return {
-      chord: bestChord,
-      confidence,
-      bassNote: NOTE_NAMES[bassIdx],
-      keyEstimate: `${NOTE_NAMES[keyIdx]} Key`
-    };
-  }, []);
-
-  const updateVisualizer = useCallback((trackDur) => {
-    if (!analyserRef.current || !audioCtxRef.current) return;
-    const ctx = audioCtxRef.current;
-    const analyser = analyserRef.current;
-
-    const dataArray = new Uint8Array(analyser.frequencyBinCount);
-    analyser.getByteFrequencyData(dataArray);
-
-    const timeData = new Float32Array(analyser.fftSize);
-    analyser.getFloatTimeDomainData(timeData);
-
-    let maxVal = 0;
-    for (let i = 0; i < timeData.length; i++) {
-      if (Math.abs(timeData[i]) > maxVal) maxVal = Math.abs(timeData[i]);
-    }
-    const db = maxVal > 0 ? Math.max(-60, 20 * Math.log10(maxVal)) : -60;
-    setPeakDb(db);
-
-    const elapsed = (ctx.currentTime - startTimeRef.current) % (trackDur || 1);
-    setCurrentTime(elapsed);
-
-    setFreqBars([
-      Math.max(8, (dataArray[2] / 255) * 100),
-      Math.max(8, (dataArray[6] / 255) * 100),
-      Math.max(8, (dataArray[16] / 255) * 100),
-      Math.max(8, (dataArray[45] / 255) * 100),
-      Math.max(8, (dataArray[90] / 255) * 100),
-    ]);
-
-    const curvePoints = Array(48).fill(0).map((_, idx) => {
-      const ratio = idx / 47;
-      const binIndex = Math.min(
-        dataArray.length - 1,
-        Math.max(1, Math.floor(Math.pow(dataArray.length - 1, ratio)))
-      );
-      return dataArray[binIndex] / 255;
-    });
-    setSpectrumCurve(curvePoints);
-
-    const detected = detectChordFromFFT(dataArray, ctx.sampleRate, analyser.fftSize);
-    if (detected && maxVal > 0.015) {
-      if (chordCandidateRef.current.label === detected.chord) {
-        chordCandidateRef.current.count += 1;
-      } else {
-        chordCandidateRef.current = { label: detected.chord, count: 1 };
-      }
-
-      if (chordCandidateRef.current.count >= 3) {
-        setChordInfo({
-          chord: detected.chord,
-          confidence: detected.confidence,
-          bassNote: detected.bassNote,
-          keyEstimate: detected.keyEstimate
-        });
-      }
-    }
-
-    animRef.current = requestAnimationFrame(() => updateVisualizer(trackDur));
-  }, [detectChordFromFFT]);
-
-  const playFromOffset = (targetTrack, offset) => {
-    initAudio();
-    const ctx = audioCtxRef.current;
-    stopAudio();
-
-    const selectedBuffer = targetTrack === 'A' ? bufferARef.current : bufferBRef.current;
-    if (!selectedBuffer) {
-      alert(`Unggah dulu file audio untuk Track ${targetTrack}!`);
-      setIsPlaying(false);
-      return;
-    }
-
-    setDuration(selectedBuffer.duration);
-    const safeOffset = offset >= selectedBuffer.duration ? 0 : offset;
-
-    const source = ctx.createBufferSource();
-    source.buffer = selectedBuffer;
-    source.loop = true;
-    source.channelCount = isMono ? 1 : 2;
-    source.channelCountMode = isMono ? 'explicit' : 'max';
-
-    gainNodeRef.current.gain.setValueAtTime(targetTrack === 'A' ? gainA : gainB, ctx.currentTime);
-
-    source.connect(gainNodeRef.current);
-    gainNodeRef.current.connect(stemFilterRef.current);
-
-    let prevNode = stemFilterRef.current;
-    for (const eqNode of eqNodesRef.current) {
-      prevNode.connect(eqNode);
-      prevNode = eqNode;
-    }
-
-    prevNode.connect(filterLowRef.current);
-    filterLowRef.current.connect(filterHighRef.current);
-    filterHighRef.current.connect(analyserRef.current);
-    analyserRef.current.connect(ctx.destination);
-
-    source.start(0, safeOffset);
-    sourceRef.current = source;
-    startTimeRef.current = ctx.currentTime - safeOffset;
-    setActiveTrack(targetTrack);
-    setIsPlaying(true);
-    updateVisualizer(selectedBuffer.duration);
-  };
-
+  /* ----- transport ----- */
+  const getPos = () => {
+    const e = eng.current, p = ps.current, s = S.current
+    if (!e || !s.playing) return posRef.current
+    let raw = p.off + (e.ctx.currentTime - p.t) * p.rate
+    const { a, b, on } = s.loop
+    if (on && loopOk(s.loop) && raw >= b) raw = a + ((raw - a) % (b - a))
+    return Math.max(0, Math.min(raw, s.files[s.active]?.buf.duration || 0))
+  }
+  const stopSrc = () => {
+    const e = eng.current, p = ps.current
+    if (!e || !p.src) return false
+    const s = p.src; ps.current = { ...p, src: null }
+    const t = e.ctx.currentTime
+    e.master.gain.cancelScheduledValues(t); e.master.gain.setValueAtTime(e.master.gain.value, t)
+    e.master.gain.linearRampToValueAtTime(0, t + 0.04)
+    try { s.stop(t + 0.045) } catch { /* sudah berhenti */ }
+    return true
+  }
+  const start = (off, over = {}) => {
+    const e = eng.current, s = { ...S.current, ...over }, f = s.files[s.active]
+    if (!e || !f) return
+    const lp = s.loop.on && loopOk(s.loop)
+    if (lp && (off < s.loop.a || off >= s.loop.b)) off = s.loop.a
+    const src = e.ctx.createBufferSource()
+    src.buffer = f.buf; src.playbackRate.value = s.rate
+    if (lp) { src.loop = true; src.loopStart = s.loop.a; src.loopEnd = s.loop.b }
+    src.connect(s.active === 'A' ? e.eqA[0] : e.eqB[0])
+    const t = e.ctx.currentTime
+    e.master.gain.cancelScheduledValues(t); e.master.gain.setValueAtTime(0, t)
+    e.master.gain.linearRampToValueAtTime(1, t + 0.04)
+    src.onended = () => { if (ps.current.src === src) { ps.current.src = null; S.current.playing = false; setPlaying(false); setP(0) } }
+    src.start(t, off)
+    ps.current = { src, off, t, rate: s.rate }
+    S.current.playing = true; setPlaying(true)
+  }
+  const restart = (off, over = {}) => {
+    if (stopSrc()) { setP(off); setTimeout(() => start(off, over), 50) } else start(off, over)
+  }
   const togglePlay = () => {
-    if (isPlaying) {
-      offsetRef.current = audioCtxRef.current.currentTime - startTimeRef.current;
-      stopAudio();
-      setIsPlaying(false);
+    const e = ensure()
+    if (!S.current.files[S.current.active]) return flash('Unggah Track A atau B dulu')
+    if (S.current.playing) {
+      const p = getPos(); stopSrc(); S.current.playing = false; setPlaying(false); setP(p)
     } else {
-      playFromOffset(activeTrack, offsetRef.current);
+      e.ctx.resume(); start(posRef.current >= dur - 0.05 ? 0 : posRef.current)
     }
-  };
+  }
+  const seek = off => { setP(off); if (S.current.playing) restart(off) }
+  const switchTrack = x => {
+    if (!files[x] || x === active) return
+    const p = Math.min(getPos(), files[x].buf.duration - 0.1)
+    setActive(x); S.current.active = x; setP(p)
+    if (S.current.playing) restart(p, { active: x })
+  }
+  const changeLoop = next => {
+    setLoop(next); S.current.loop = next
+    if (S.current.playing) restart(getPos(), { loop: next })
+  }
+  const changeRate = r => {
+    setRate(r); S.current.rate = r
+    const e = eng.current, p = ps.current
+    if (e && p.src) { const now = getPos(); p.src.playbackRate.value = r; ps.current = { ...p, off: now, t: e.ctx.currentTime, rate: r } }
+  }
 
-  const handleSeek = (e) => {
-    const newTime = parseFloat(e.target.value);
-    setCurrentTime(newTime);
-    offsetRef.current = newTime;
-    if (isPlaying) playFromOffset(activeTrack, newTime);
-  };
+  /* ----- unggah + analisis otomatis ----- */
+  const loadBuffer = async (slot, ab, name) => {
+    const e = ensure()
+    flash(`Membaca ${name}…`)
+    try {
+      const buf = await e.ctx.decodeAudioData(ab)
+      const lufs = estimateLufs(buf)
+      const info = { name, buf, peaks: waveformPeaks(buf), bpm: detectBpm(buf), lufs, norm: Math.min(1, 10 ** ((-14 - lufs) / 20)) }
+      setFiles(f => ({ ...f, [slot]: info }))
+      setTimeout(() => {
+        const harm = analyzeHarmony(buf, chordMode)
+        setFiles(f => (f[slot]?.buf === buf ? { ...f, [slot]: { ...f[slot], harm } } : f))
+      }, 80)
+      if (!S.current.files[S.current.active]) { setActive(slot); S.current.active = slot }
+      flash(`${name} siap · ${info.bpm ?? '?'} BPM`)
+    } catch { flash('Audio tidak bisa dibaca. Coba WAV / MP3.') }
+  }
+  const load = async (slot, file) => { if (file) loadBuffer(slot, await file.arrayBuffer(), file.name) }
+  const loadUrl = async (slot, raw) => {
+    const url = raw.trim()
+    if (!/^https?:\/\//i.test(url)) return flash('Isi link yang diawali https://')
+    if (/youtu\.?be/i.test(url)) return flash('Link YouTube tidak bisa dipakai. Pakai file audio atau link langsung .mp3/.wav')
+    flash('Mengunduh audio…')
+    try {
+      const r = await fetch(url)
+      if (!r.ok) throw new Error('http')
+      loadBuffer(slot, await r.arrayBuffer(), decodeURIComponent(url.split('?')[0].split('/').pop()) || 'audio-link')
+    } catch { flash('Gagal. Server link ini tidak mengizinkan akses. Unduh filenya lalu unggah.') }
+  }
+  const toggleRec = async slot => {
+    if (recSlot) { rec.current?.stop(); return }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } })
+      const mr = new MediaRecorder(stream), chunks = []
+      mr.ondataavailable = e => chunks.push(e.data)
+      mr.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop()); setRecSlot(null)
+        loadBuffer(slot, await new Blob(chunks, { type: mr.mimeType }).arrayBuffer(), `rekaman-${new Date().toTimeString().slice(0, 5).replace(':', '.')}`)
+      }
+      rec.current = mr; mr.start(); setRecSlot(slot)
+    } catch { flash('Mikrofon tidak bisa diakses. Izinkan akses mikrofon di browser.') }
+  }
 
-  const switchTrack = (track) => {
-    const nowOffset = isPlaying ? (audioCtxRef.current.currentTime - startTimeRef.current) : offsetRef.current;
-    offsetRef.current = nowOffset;
-    setActiveTrack(track);
-    const buf = track === 'A' ? bufferARef.current : bufferBRef.current;
-    if (buf) setDuration(buf.duration);
-    if (isPlaying) playFromOffset(track, nowOffset);
-  };
+  // Analisis ulang harmony saat mode akor (Dasar vs Extended) diubah
+  useEffect(() => {
+    ['A', 'B'].forEach(slot => {
+      const buf = files[slot]?.buf
+      if (!buf) return
+      const id = setTimeout(() => {
+        const harm = analyzeHarmony(buf, chordMode)
+        setFiles(f => (f[slot]?.buf === buf ? { ...f, [slot]: { ...f[slot], harm } } : f))
+      }, 40)
+      return () => clearTimeout(id)
+    })
+  }, [chordMode]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleEqChange = (index, value) => {
-    const parsed = parseFloat(value);
-    setActiveEqPreset('custom');
-    setEqGains((prev) => {
-      const next = [...prev];
-      next[index] = parsed;
-      return next;
-    });
-  };
+  /* ----- sinkron parameter audio ----- */
+  const set = (p, v, tc = 0.02) => p.setTargetAtTime(v, eng.current.ctx.currentTime, tc)
+  useEffect(() => {
+    if (!ready) return
+    const e = eng.current
+    set(e.gA.gain, vol.A * (spot && files.A ? files.A.norm : 1))
+    set(e.gB.gain, vol.B * (spot && files.B ? files.B.norm : 1))
+  }, [vol, spot, files, ready])
+  useEffect(() => {
+    if (!ready) return
+    const e = eng.current
+    ;[['A', e.eqA], ['B', e.eqB]].forEach(([k, chain]) => {
+      const on = eqOn && eqScope.includes(k)
+      chain.forEach((n, i) => {
+        const b = bands[i]
+        set(n.frequency, b.f); set(n.gain, on ? b.g : 0)
+        if (EQ_DEFAULT[i].type === 'peaking') set(n.Q, b.q)
+      })
+    })
+  }, [bands, eqOn, eqScope, ready])
+  useEffect(() => {
+    if (!ready) return
+    const e = eng.current, d = DEVICES[device]
+    set(e.dHp.frequency, d.hp); set(e.dLp.frequency, d.lp); set(e.dLs.gain, d.ls)
+  }, [device, ready])
+  useEffect(() => { if (ready) { const [h, l] = SOLO[solo]; set(eng.current.sHp.frequency, h); set(eng.current.sLp.frequency, l) } }, [solo, ready])
 
-  const applyEqPreset = (preset) => {
-    setActiveEqPreset(preset.id);
-    setEqGains([...preset.gains]);
-  };
+  // Sinkronisasi Pemisah Instrumen + Kanal Stereo/Mono/Vocal Remover
+  useEffect(() => {
+    if (!ready) return
+    const e = eng.current
+    const st = STEMS[stemMode] || STEMS.full
+    const matKey = vocalRm ? 'side' : (stemMode !== 'full' ? st.mat : ch)
+    const m = MATRIX[matKey]
+    e.mx.forEach((g, i) => set(g.gain, m[i], 0.01))
+    set(e.stHp.frequency, st.hp)
+    set(e.stLp.frequency, st.lp)
+    set(e.stPk.frequency, st.pkF)
+    set(e.stPk.gain, st.pkG)
+    set(e.stPk.Q, st.pkQ)
+  }, [ch, vocalRm, stemMode, ready])
 
-  const resetEq = () => {
-    setActiveEqPreset('flat');
-    setEqGains([0, 0, 0, 0, 0, 0]);
-  };
+  useEffect(() => {
+    if (!ready) return
+    const e = eng.current, g = noise.mode === 'off' ? 0 : noise.level * 0.25
+    if (noise.mode === 'cafe') { e.nFilter.type = 'bandpass'; e.nFilter.frequency.value = 1400; e.nFilter.Q.value = 0.35 }
+    if (noise.mode === 'street') { e.nFilter.type = 'lowpass'; e.nFilter.frequency.value = 350; e.nFilter.Q.value = 0.7 }
+    set(e.nGain.gain, g, 0.1); set(e.lfoG.gain, g * 0.35, 0.1)
+  }, [noise, ready])
 
-  const formatTime = (sec) => {
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m}:${s < 10 ? '0' : ''}${s}`;
-  };
+  useEffect(() => {
+    if (!ready) return
+    const e = eng.current
+    set(e.outVol.gain, outVol); set(e.limDirect.gain, limiter ? 0 : 1, 0.02); set(e.limComp.gain, limiter ? 1 : 0, 0.02)
+  }, [outVol, limiter, ready])
+  useEffect(() => {
+    if (!ready || !pitchOk) return
+    const e = eng.current, total = tr[active] + (keepPitch ? -12 * Math.log2(rate) : 0), sh = Math.abs(total) > 0.01
+    set(e.pitch.parameters.get('ratio'), 2 ** (total / 12), 0.03)
+    set(e.direct.gain, sh ? 0 : 1, 0.02); set(e.shifted.gain, sh ? 1 : 0, 0.02)
+  }, [tr, active, keepPitch, rate, ready, pitchOk])
+  useEffect(() => {
+    if (!met.on || !ready) return
+    const e = eng.current; let next = e.ctx.currentTime + 0.05, n = 0
+    const id = setInterval(() => {
+      while (next < e.ctx.currentTime + 0.15) {
+        const o = e.ctx.createOscillator(), g = e.ctx.createGain()
+        o.frequency.value = n % 4 === 0 ? 1500 : 1000
+        g.gain.setValueAtTime(met.vol * 0.4, next); g.gain.exponentialRampToValueAtTime(0.001, next + 0.05)
+        o.connect(g); g.connect(e.ctx.destination); o.start(next); o.stop(next + 0.06)
+        next += 60 / met.bpm; n++
+      }
+    }, 30)
+    return () => clearInterval(id)
+  }, [met, ready])
+  keyRef.current = e => {
+    if (e.defaultPrevented || /^(INPUT|TEXTAREA|SELECT|BUTTON|SUMMARY)$/.test(e.target.tagName)) return
+    if (e.key === ' ') { e.preventDefault(); togglePlay() }
+    else if (e.key === 'ArrowRight') seek(Math.min(dur, getPos() + 5))
+    else if (e.key === 'ArrowLeft') seek(Math.max(0, getPos() - 5))
+    else if (e.key === '1') switchTrack('A')
+    else if (e.key === '2') switchTrack('B')
+  }
+  useEffect(() => {
+    const f = e => keyRef.current(e)
+    window.addEventListener('keydown', f)
+    return () => window.removeEventListener('keydown', f)
+  }, [])
 
-  const buildEqCurvePath = () => {
-    const width = 600;
-    const height = 140;
-    const midY = height / 2;
-    const points = eqGains.map((gain, idx) => {
-      const x = (idx / (eqGains.length - 1)) * width;
-      const y = midY - (gain / 12) * (height * 0.4);
-      return [x, y];
-    });
+  /* ----- meter & posisi + grafik spektrum EQ (rAF) ----- */
+  useEffect(() => {
+    let id
+    const tick = () => {
+      const e = eng.current
+      if (e && S.current.playing) {
+        setP(getPos())
+        const f = new Float32Array(e.an.frequencyBinCount); e.an.getFloatFrequencyData(f)
+        const hz = e.ctx.sampleRate / e.an.fftSize
+        const raw = BANDS.map(([, lo, hi]) => { let s = 0, c = 0; for (let i = Math.floor(lo / hz); i <= Math.ceil(hi / hz); i++) { s += f[i]; c++ } return Math.max(-100, s / c) })
+        smooth.current = smooth.current.map((v, i) => v * 0.8 + raw[i] * 0.2)
 
-    if (points.length === 0) return '';
-    let d = `M ${points[0][0]} ${points[0][1]}`;
-    for (let i = 0; i < points.length - 1; i++) {
-      const [x0, y0] = points[i];
-      const [x1, y1] = points[i + 1];
-      const cx = (x0 + x1) / 2;
-      d += ` C ${cx} ${y0}, ${cx} ${y1}, ${x1} ${y1}`;
+        // Sampling 64 titik spektrum logaritmik (20 Hz - 20 kHz) untuk grafik di belakang kurva EQ 6-band
+        const pts = new Array(64)
+        for (let k = 0; k < 64; k++) {
+          const freq = FMIN * Math.pow(FMAX / FMIN, k / 63)
+          const bin = Math.min(f.length - 1, Math.max(1, Math.round(freq / hz)))
+          const normDb = (f[bin] + 95) / 80
+          pts[k] = Math.max(0, Math.min(1, normDb))
+        }
+        setSpecCurve(pts)
+
+        const t = new Float32Array(e.an.fftSize); e.an.getFloatTimeDomainData(t)
+        let pk = 0; for (const x of t) pk = Math.max(pk, Math.abs(x))
+        const l = new Float32Array(2048), r = new Float32Array(2048); e.anL.getFloatTimeDomainData(l); e.anR.getFloatTimeDomainData(r)
+        let lr = 0, ll = 0, rr = 0; for (let i = 0; i < 2048; i++) { lr += l[i] * r[i]; ll += l[i] * l[i]; rr += r[i] * r[i] }
+        setMeters({ bands: [...smooth.current], peak: db(pk), corr: ll && rr ? lr / Math.sqrt(ll * rr) : 0 })
+      }
+      id = requestAnimationFrame(tick)
     }
-    return d;
-  };
+    id = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(id)
+  }, [])
 
-  const buildSpectrumAreaPath = () => {
-    const width = 600;
-    const height = 140;
-    if (!spectrumCurve.length) return `M 0 ${height} L ${width} ${height} Z`;
+  useEffect(() => {
+    let t
+    const f = () => { clearTimeout(t); t = setTimeout(() => setVw(window.innerWidth), 120) }
+    window.addEventListener('resize', f)
+    return () => { window.removeEventListener('resize', f); clearTimeout(t) }
+  }, [])
 
-    const coords = spectrumCurve.map((val, idx) => {
-      const x = (idx / (spectrumCurve.length - 1)) * width;
-      const y = height - Math.min(1, Math.max(0, val)) * (height - 10);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    });
+  /* ----- waveform ----- */
+  useEffect(() => {
+    const c = canvas.current
+    if (!c || tab !== 1) return
+    const g = c.getContext('2d'), W = (c.width = c.clientWidth * 2), H = (c.height = 120)
+    g.clearRect(0, 0, W, H); g.fillStyle = THEMES[theme].acc
+    const p = cur?.peaks || []
+    p.forEach((v, i) => { const h = Math.max(2, v * H * 0.95), x = (i / p.length) * W; g.fillRect(x, (H - h) / 2, Math.max(1, W / p.length - 1), h) })
+  }, [cur, theme, tab, vw])
 
-    return `M 0 ${height} L ${coords.join(' L ')} L ${width} ${height} Z`;
-  };
+  /* ----- aksi lain ----- */
+  const addNote = () => {
+    if (!noteText.trim()) return
+    setNotes(n => [...n, { t: pos, text: noteText.trim() }].sort((a, b) => a.t - b.t)); setNoteText('')
+  }
+  const copyReport = async () => {
+    const body = notes.map(n => `[${fmt(n.t)}] ${n.text}`).join('\n')
+    const txt = `*Catatan Mix — ${files.A?.name || 'Mix Band'}*\n${body}`
+    try { await navigator.clipboard.writeText(txt); flash('Laporan disalin, tinggal tempel di WA') } catch { flash('Gagal menyalin') }
+  }
+  const cutPromo = () => {
+    const f = files[active]; if (!f) return flash('Unggah audio dulu')
+    const b = f.buf, sr = b.sampleRate
+    const st = Math.floor(Math.min(promoStart ?? (loopOk(loop) ? loop.a : pos), b.duration - 0.1) * sr)
+    const n = Math.min(Math.round(promoLen * sr), b.length - st), fi = Math.floor(0.04 * sr), fo = Math.min(Math.floor(0.8 * sr), n)
+    if (n <= 0) return flash('Durasi tidak valid')
+    const chs = Array.from({ length: b.numberOfChannels }, (_, c) => {
+      const out = b.getChannelData(c).slice(st, st + n)
+      for (let i = 0; i < fi && i < n; i++) out[i] *= i / fi
+      for (let i = 0; i < fo && i < n; i++) out[n - 1 - i] *= i / fo
+      return out
+    })
+    download(encodeWav(chs, sr), `promo-${promoLen}s-dari-${fmt(st / sr).replace(':', 'm')}.wav`)
+  }
+  const splitLR = () => {
+    const b = files.A?.buf; if (!b) return flash('Unggah Track A dulu')
+    if (b.numberOfChannels < 2) return flash('File ini mono, tidak bisa dipisah L/R')
+    const base = files.A.name.replace(/\.[^.]+$/, '')
+    download(encodeWav([b.getChannelData(0)], b.sampleRate), `${base}-L.wav`)
+    setTimeout(() => download(encodeWav([b.getChannelData(1)], b.sampleRate), `${base}-R.wav`), 400)
+  }
+  const toggleCheck = i => setChecks(c => {
+    const n = c.includes(i) ? c.filter(x => x !== i) : [...c, i]
+    try { localStorage.setItem('cmb-checks', JSON.stringify(n)) } catch { /* abaikan */ }
+    return n
+  })
 
-  const getAdvisorMessage = () => {
-    if (peakDb > -0.5) return { warn: true, text: 'Peringatan Clipping! Sinyal melewati -0.5 dB. Turunkan Limiter atau Volume Master.' };
-    if (stemMode !== 'full') return { warn: false, text: `Mode Isolasi "${stemMode.toUpperCase()}" aktif untuk membantu fokus analisis elemen lagu.` };
-    if (isMono) return { warn: false, text: 'Mode Mono Aktif: Dengarkan apakah gitar ritem atau vokal terdengar menipis/hilang.' };
-    if (freqBars[2] > freqBars[3] + 18) return { warn: true, text: 'Area Low-Mid (250-500 Hz) cukup padat. Cek apakah suara mix terdengar agak mendem.' };
-    return { warn: false, text: 'Keseimbangan spektrum dan headroom terpantau aman untuk standar streaming.' };
-  };
+  const levelMatch = () => {
+    const a = files.A, b = files.B
+    if (!a || !b) return flash('Unggah Track A dan B dulu')
+    setVol(o => ({ ...o, B: Math.max(0.05, Math.min(1, o.A * 10 ** ((a.lufs - b.lufs) / 20))) }))
+    flash('Loudness Track B disamakan dengan A (estimasi)')
+  }
+  const matchKey = () => {
+    const a = files.A?.harm?.key, b = files.B?.harm?.key
+    if (!a || !b) return flash('Tunggu analisis kunci kedua track selesai')
+    const eq = k => (k.mode === 'min' ? (k.root + 3) % 12 : k.root)
+    let d = mod12(eq(a) - eq(b)); if (d > 6) d -= 12
+    setTr(o => ({ ...o, B: d })); flash(`Track B ditranspose ${d > 0 ? '+' : ''}${d} semiton`)
+  }
+  const toggleMet = () => { ensure(); setMet(m => ({ ...m, on: !m.on })) }
+  const tap = () => {
+    const now = performance.now(), t = taps.current
+    if (t.length && now - t[t.length - 1] > 2500) t.length = 0
+    t.push(now)
+    const a = t.slice(-6)
+    if (a.length > 1) setMet(m => ({ ...m, bpm: Math.max(40, Math.min(220, Math.round(60000 / ((a[a.length - 1] - a[0]) / (a.length - 1))))) }))
+  }
+  const harm = cur?.harm, chords = harm?.chords || [], trA = tr[active]
+  let ci = -1; chords.forEach((c, i) => { if (c.t <= pos) ci = i })
+  const c0 = Math.max(0, ci - 2)
 
-  const advisor = getAdvisorMessage();
-  const accentColor = activeTrack === 'A' ? '#38bdf8' : '#c084fc';
-  const cardStyle = {
-    background: 'linear-gradient(145deg, rgba(30,41,59,0.85), rgba(15,23,42,0.95))',
-    border: '1px solid rgba(148,163,184,0.15)',
-    borderRadius: '16px',
-    padding: '18px',
-    boxShadow: '0 8px 24px rgba(0,0,0,0.25)'
-  };
+  /* ----- render ----- */
+  const T = THEMES[theme]
+  const mean = meters.bands.reduce((a, b) => a + b, 0) / 5
+  const pct = v => Math.max(0, Math.min(100, ((v + 100) / 100) * 100))
+  const semis = 12 * Math.log2(rate)
 
   return (
-    <div style={{ background: 'radial-gradient(circle at top, #1e1b4b 0%, #090d16 65%)', color: '#f8fafc', minHeight: '100vh', padding: '20px', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
-      <div style={{ maxWidth: '780px', margin: '0 auto' }}>
-
-        {/* Header & Nama Band */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Activity color="#38bdf8" size={24} />
-              {isEditingName ? (
-                <input
-                  value={bandName}
-                  onChange={(e) => { setBandName(e.target.value); localStorage.setItem('bandName', e.target.value); }}
-                  onBlur={() => setIsEditingName(false)}
-                  autoFocus
-                  style={{ background: '#1e293b', color: '#fff', border: '1px solid #38bdf8', borderRadius: '6px', padding: '4px 8px', fontSize: '18px', fontWeight: 'bold' }}
-                />
-              ) : (
-                <h1 onClick={() => setIsEditingName(true)} style={{ fontSize: '20px', fontWeight: '800', margin: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', letterSpacing: '0.5px' }}>
-                  {bandName} <Edit3 size={14} color="#64748b" />
-                </h1>
-              )}
-            </div>
-            <p style={{ color: '#94a3b8', fontSize: '12px', margin: '4px 0 0 0' }}>Mix & Master Diagnostic Console v2.3</p>
-          </div>
-
-          <div style={{ backgroundColor: 'rgba(15,23,42,0.8)', padding: '6px 12px', borderRadius: '20px', border: '1px solid #334155', fontSize: '12px', color: '#38bdf8', fontWeight: '600' }}>
-            Target Spotify: -14 LUFS / -1.0 dBTP
-          </div>
+    <div className="app" style={{ '--bg': T.bg, '--panel': T.panel, '--line': T.line, '--text': T.text, '--mute': T.mute, '--acc': T.acc }}>
+      <style>{CSS}</style>
+      <header>
+        <div className="brand">
+          <span className={`logo${playing ? ' live' : ''}`}><i /><i /><i /></span>
+          <div><h1>DIY Studio &amp; Stage Console <span className="by">by. Ares</span></h1><small>v4.4 · cek mix band</small></div>
         </div>
+        <Seg value={theme} onChange={setTheme} options={Object.entries(THEMES).map(([k, v]) => [k, v.n])} />
+      </header>
+      <nav><button className={tab === 1 ? 'on' : ''} onClick={() => setTab(1)}>Mix &amp; Referensi</button>
+        <button className={tab === 2 ? 'on' : ''} onClick={() => setTab(2)}>Promo, Live &amp; Rilis</button></nav>
+      {msg && <div className="toast">{msg}</div>}
 
-        {/* Upload & Gain Matching */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '14px', marginBottom: '16px' }}>
-          {[
-            { id: 'A', title: 'TRACK A • Mix Band', name: trackAName, color: '#38bdf8', gain: gainA, setGain: setGainA },
-            { id: 'B', title: 'TRACK B • Lagu Referensi', name: trackBName, color: '#c084fc', gain: gainB, setGain: setGainB }
-          ].map((t) => (
-            <div key={t.id} style={{ ...cardStyle, border: activeTrack === t.id ? `1.5px solid ${t.color}` : '1px solid rgba(148,163,184,0.15)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                <span style={{ fontWeight: '700', fontSize: '13px', color: t.color }}>{t.title}</span>
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', backgroundColor: '#334155', padding: '5px 10px', borderRadius: '8px', cursor: 'pointer', fontSize: '11px', fontWeight: '600' }}>
-                  <Upload size={13} /> Pilih File
-                  <input type="file" accept="audio/*" onChange={(e) => handleFileUpload(e, t.id)} style={{ display: 'none' }} />
-                </label>
-              </div>
-              <div style={{ fontSize: '12px', color: '#cbd5e1', marginBottom: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: '#94a3b8' }}>
-                <Sliders size={13} /> Gain:
-                <input type="range" min="0.2" max="1.5" step="0.05" value={t.gain} onChange={(e) => t.setGain(parseFloat(e.target.value))} style={{ flex: 1, accentColor: t.color }} />
-                <span style={{ width: '36px', textAlign: 'right' }}>{Math.round(t.gain * 100)}%</span>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Transport & Timeline Seekbar */}
-        <div style={{ ...cardStyle, marginBottom: '16px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '14px' }}>
-            <button onClick={togglePlay} style={{ background: isPlaying ? 'linear-gradient(90deg, #ef4444, #dc2626)' : 'linear-gradient(90deg, #10b981, #059669)', color: '#fff', border: 'none', padding: '10px 20px', borderRadius: '10px', fontWeight: '700', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
-              {isPlaying ? <><Pause size={16} /> Pause</> : <><Play size={16} /> Putar Audio</>}
-            </button>
-
-            <div style={{ display: 'flex', gap: '8px', backgroundColor: '#0f172a', padding: '4px', borderRadius: '10px' }}>
-              <button onClick={() => switchTrack('A')} style={{ backgroundColor: activeTrack === 'A' ? '#0284c7' : 'transparent', color: '#fff', border: 'none', padding: '7px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: '700', fontSize: '12px' }}>
-                A • Mix Band
-              </button>
-              <button onClick={() => switchTrack('B')} style={{ backgroundColor: activeTrack === 'B' ? '#9333ea' : 'transparent', color: '#fff', border: 'none', padding: '7px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: '700', fontSize: '12px' }}>
-                B • Referensi
-              </button>
-            </div>
+      {tab === 1 && <main>
+        <Card title="Pemutar A/B" wide>
+          <div className="slots">
+            {['A', 'B'].map(x => (
+              <div key={x} className={`slot${active === x ? ' act' : ''}`}>
+                <button className="sw" onClick={() => switchTrack(x)} disabled={!files[x]}><i className="led" />Track {x} · {x === 'A' ? 'Mix Band' : 'Referensi'}</button>
+                <label className="up"><Upload size={14} /> {files[x]?.name || 'Pilih file audio'}
+                  <input type="file" accept="audio/*" hidden onChange={e => load(x, e.target.files[0])} /></label>
+                {files[x] && <small>{files[x].bpm ?? '—'} BPM · ≈{files[x].lufs.toFixed(1)} LUFS</small>}
+                <details className="more"><summary>Sumber lain: link atau rekam</summary>
+                  <div>
+                    <input className="txt" placeholder="https://…/lagu.mp3" value={urls[x]} onChange={e => setUrls(u => ({ ...u, [x]: e.target.value }))}
+                      onKeyDown={e => e.key === 'Enter' && loadUrl(x, urls[x])} />
+                    <button onClick={() => loadUrl(x, urls[x])}><Link2 size={14} /> Muat</button>
+                    <button className={recSlot === x ? 'rec' : ''} disabled={!!recSlot && recSlot !== x} onClick={() => toggleRec(x)}>
+                      <Mic size={14} /> {recSlot === x ? 'Stop rekam' : 'Rekam mic'}</button>
+                  </div>
+                  <small className="hint">Link harus langsung ke file audio (.mp3/.wav) dan servernya mengizinkan akses. Link YouTube tidak didukung.</small>
+                </details>
+                <Slider label="Gain" value={vol[x]} onChange={v => setVol(o => ({ ...o, [x]: v }))} show={`${Math.round(vol[x] * 100)}%`} />
+              </div>))}
           </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '12px', color: '#94a3b8' }}>
-            <span>{formatTime(currentTime)}</span>
-            <input type="range" min="0" max={duration || 100} step="0.1" value={currentTime} onChange={handleSeek} style={{ flex: 1, accentColor: accentColor, cursor: 'pointer' }} />
-            <span>{formatTime(duration)}</span>
+          <div className="row"><button onClick={levelMatch}>Samakan loudness B ke A</button>
+            <small>Pintasan: Spasi putar/jeda, ←/→ geser 5 detik, 1/2 pilih track</small></div>
+          <div className="wave" ref={seekEl} onClick={e => { if (!dur) return; const r = e.currentTarget.getBoundingClientRect(); seek(((e.clientX - r.left) / r.width) * dur) }}>
+            <canvas ref={canvas} />
+            {loopOk(loop) && <i className="lp" style={{ left: `${(loop.a / dur) * 100}%`, width: `${((loop.b - loop.a) / dur) * 100}%`, opacity: loop.on ? 1 : 0.4 }} />}
+            {dur > 0 && <i className="pl" style={{ width: `${(pos / dur) * 100}%` }} />}
+            {dur > 0 && <i className="ph" style={{ left: `${(pos / dur) * 100}%` }} />}
           </div>
-        </div>
-
-        {/* Pemisah Instrumen & Deteksi Chord (dengan Opsi Akor Tambahan) */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(290px, 1fr))', gap: '14px', marginBottom: '16px' }}>
-          <div style={cardStyle}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: '700', marginBottom: '10px', color: '#94a3b8', textTransform: 'uppercase' }}>
-              <Layers size={14} color="#38bdf8" /> Pemisah Instrumen (Stem Isolator)
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '7px' }}>
-              {[
-                { id: 'full', label: 'Full Mix' },
-                { id: 'vocal', label: 'Vokal / Lead' },
-                { id: 'drums', label: 'Drums / Beat' },
-                { id: 'bass', label: 'Bass / Sub' },
-                { id: 'karaoke', label: 'Minus Vocal' }
-              ].map((item) => (
-                <button
-                  key={item.id}
-                  onClick={() => setStemMode(item.id)}
-                  style={{
-                    backgroundColor: stemMode === item.id ? '#0284c7' : '#1e293b',
-                    color: '#fff',
-                    border: stemMode === item.id ? '1px solid #38bdf8' : '1px solid #334155',
-                    padding: '8px 6px',
-                    borderRadius: '8px',
-                    cursor: 'pointer',
-                    fontSize: '11px',
-                    fontWeight: '700'
-                  }}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
+          <div className="row">
+            <button className="primary play" onClick={togglePlay}>{playing ? <Pause size={16} /> : <Play size={16} />}{playing ? 'Jeda' : 'Putar'}</button>
+            <span className="time">{fmt(pos)} / {fmt(dur)}</span>
+            <button onClick={() => changeLoop({ ...loop, a: pos })}>Set A</button>
+            <button onClick={() => changeLoop({ ...loop, b: pos })}>Set B</button>
+            <button className={loop.on ? 'on' : ''} disabled={!loopOk(loop)} onClick={() => changeLoop({ ...loop, on: !loop.on })}><Repeat size={14} /> Loop {loop.on ? 'ON' : 'OFF'}</button>
+            {loop.a != null && <small>A {fmt(loop.a)}{loop.b != null && ` – B ${fmt(loop.b)}`}</small>}
           </div>
+          <Slider label="Kecepatan" min={0.75} max={1.25} step={0.01} value={rate} onChange={changeRate}
+            show={keepPitch && pitchOk ? `${rate.toFixed(2)}×` : `${rate.toFixed(2)}× (${semis >= 0 ? '+' : ''}${semis.toFixed(1)} st)`} />
+          <label className="chk"><input type="checkbox" checked={keepPitch} onChange={e => setKeepPitch(e.target.checked)} /> Jaga nada saat kecepatan berubah (cocok untuk latihan)</label>
+          {keepPitch && !pitchOk && <small className="hint">Pitch shifter belum siap atau tidak didukung browser ini, jadi nada ikut berubah seperti kaset.</small>}
+        </Card>
 
-          <div style={cardStyle}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', gap: '6px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase' }}>
-                <Music size={14} color="#c084fc" /> Chord Analyzer
-              </div>
-              {/* Opsi Deteksi Jenis Akor: Dasar vs Tambahan (Extended) */}
-              <div style={{ display: 'flex', backgroundColor: '#0f172a', padding: '2px', borderRadius: '7px', border: '1px solid #334155' }}>
-                {[
-                  { id: 'basic', label: 'Dasar' },
-                  { id: 'extended', label: 'Extended (9/add9/sus)' }
-                ].map((opt) => (
-                  <button
-                    key={opt.id}
-                    onClick={() => setChordComplexity(opt.id)}
-                    style={{
-                      backgroundColor: chordComplexity === opt.id ? '#9333ea' : 'transparent',
-                      color: chordComplexity === opt.id ? '#fff' : '#94a3b8',
-                      border: 'none',
-                      padding: '4px 7px',
-                      borderRadius: '5px',
-                      fontSize: '10px',
-                      fontWeight: '700',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
+        <Card title="Pemisah Instrumen (Stem Isolator)" wide>
+          <Seg value={stemMode} onChange={setStemMode} options={Object.entries(STEMS).map(([k, v]) => [k, v.n])} />
+          <small className="hint">Pisahkan elemen instrumen secara real-time (Vokal/Lead, Bass/Sub, Drums/Beat, Gitar/Side, atau Minus Vocal) menggunakan pemrosesan Mid-Side dan filter frekuensi tanpa mengubah file asli.</small>
+        </Card>
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <div style={{ fontSize: '30px', fontWeight: '800', color: '#f8fafc', lineHeight: 1.1 }}>
-                  {isPlaying ? chordInfo.chord : '--'}
-                </div>
-                <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '6px' }}>
-                  Bass: <strong style={{ color: '#e2e8f0' }}>{isPlaying ? chordInfo.bassNote : '--'}</strong> • {isPlaying ? chordInfo.keyEstimate : 'Menunggu audio'}
-                </div>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: '11px', color: '#94a3b8' }}>Akurasi</div>
-                <div style={{ fontSize: '18px', fontWeight: '700', color: chordInfo.confidence >= 60 ? '#10b981' : '#f59e0b' }}>
-                  {isPlaying ? `${chordInfo.confidence}%` : '0%'}
-                </div>
-              </div>
-            </div>
+        <Card title="Kunci, Chord & Transpose" wide>
+          <div className="row">
+            <small>Jenis deteksi akor</small>
+            <Seg value={chordMode} onChange={setChordMode} options={[['basic', 'Dasar (Mayor/Minor/7)'], ['extended', 'Extended (add9 / sus / 9 / dim7)']]} />
           </div>
-        </div>
-
-        {/* Equalizer 6-Band + Preset EQ + Grafik Spektrum di Belakang Kurva */}
-        <div style={{ ...cardStyle, marginBottom: '16px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginBottom: '10px' }}>
-            <div style={{ fontSize: '12px', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-              Equalizer 6-Band & Grafik Spektrum
-            </div>
-            <button
-              onClick={resetEq}
-              style={{
-                backgroundColor: '#1e293b',
-                color: '#cbd5e1',
-                border: '1px solid #334155',
-                borderRadius: '6px',
-                padding: '4px 9px',
-                fontSize: '11px',
-                cursor: 'pointer',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '4px'
-              }}
-            >
-              <RotateCcw size={12} /> Reset EQ
-            </button>
+          <div className="keys">
+            {['A', 'B'].map(x => {
+              const h = files[x]?.harm
+              return (
+                <div key={x} className={`kbox${active === x ? ' act' : ''}`}>
+                  <small>Track {x} · {x === 'A' ? 'Mix Band' : 'Referensi'}</small>
+                  {!files[x] ? <b>—</b> : !h ? <b>menganalisis…</b> : (<>
+                    <b>{keyName(h.key, tr[x])}</b>
+                    <small>{tr[x] !== 0 && `asli ${keyName(h.key)} · `}relatif {keyName(relKey(h.key), tr[x])} · keyakinan {h.key.conf}</small></>)}
+                </div>)
+            })}
           </div>
-
-          {/* Pilihan Preset EQ */}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '12px' }}>
-            {EQ_PRESETS.map((preset) => (
-              <button
-                key={preset.id}
-                onClick={() => applyEqPreset(preset)}
-                style={{
-                  backgroundColor: activeEqPreset === preset.id ? '#0284c7' : '#0f172a',
-                  color: activeEqPreset === preset.id ? '#fff' : '#cbd5e1',
-                  border: activeEqPreset === preset.id ? '1px solid #38bdf8' : '1px solid #334155',
-                  borderRadius: '8px',
-                  padding: '5px 10px',
-                  fontSize: '11px',
-                  fontWeight: '600',
-                  cursor: 'pointer'
-                }}
-              >
-                {preset.label}
-              </button>
-            ))}
+          <Slider label="Transpose" min={-12} max={12} step={1} value={trA} onChange={v => setTr(o => ({ ...o, [active]: v }))}
+            show={`${trA > 0 ? '+' : ''}${trA} semiton`} />
+          <div className="row">
+            <button onClick={() => setTr(o => ({ ...o, [active]: Math.max(-12, o[active] - 1) }))}>−1</button>
+            <button onClick={() => setTr(o => ({ ...o, [active]: Math.min(12, o[active] + 1) }))}>+1</button>
+            <button onClick={() => setTr(o => ({ ...o, [active]: 0 }))}>Reset</button>
+            <button onClick={matchKey}>Samakan kunci B ke A</button>
+            <small>Berlaku untuk Track {active}. {pitchOk ? '' : 'Pitch shifter belum siap.'}</small>
           </div>
+          {chords.length > 0 ? (<>
+            <div className="now"><span>{ci >= 0 ? tChord(chords[ci].name, trA) : '—'}</span>
+              <small>berikutnya: {chords[ci + 1] ? tChord(chords[ci + 1].name, trA) : '—'}</small></div>
+            <div className="chips">{chords.slice(c0, c0 + 12).map((c, k) => (
+              <button key={c0 + k} className={c0 + k === ci ? 'on' : ''} onClick={() => seek(c.t)}>{tChord(c.name, trA)}<small>{fmt(c.t)}</small></button>))}</div>
+          </>) : <small className="hint">{harm ? 'Chord tidak terdeteksi pada audio ini.' : 'Unggah lagu untuk melihat kunci dan chord.'}</small>}
+          <small className="hint">Deteksi chord sudah dikoreksi dengan bobot nada bass/root serta filter smoothing antar-frame agar tidak mudah meleset saat transisi ketukan.</small>
+        </Card>
 
-          {/* Canvas SVG Grafik Audio di Belakang Kurva EQ */}
-          <div style={{ position: 'relative', backgroundColor: '#090d16', borderRadius: '10px', border: '1px solid rgba(148,163,184,0.12)', overflow: 'hidden', marginBottom: '14px' }}>
-            <svg viewBox="0 0 600 140" style={{ width: '100%', height: '140px', display: 'block' }}>
-              <defs>
-                <linearGradient id="bgWaveGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={accentColor} stopOpacity="0.45" />
-                  <stop offset="100%" stopColor={accentColor} stopOpacity="0.03" />
-                </linearGradient>
-              </defs>
-
-              <line x1="0" y1="70" x2="600" y2="70" stroke="rgba(148,163,184,0.22)" strokeDasharray="4 4" strokeWidth="1" />
-              <path d={buildSpectrumAreaPath()} fill="url(#bgWaveGrad)" />
-              <path d={buildEqCurvePath()} fill="none" stroke="#f8fafc" strokeWidth="2.5" />
-
-              {eqGains.map((gain, idx) => {
-                const x = (idx / (eqGains.length - 1)) * 600;
-                const y = 70 - (gain / 12) * 56;
-                return (
-                  <circle
-                    key={EQ_FREQS[idx]}
-                    cx={x}
-                    cy={y}
-                    r="5"
-                    fill={accentColor}
-                    stroke="#090d16"
-                    strokeWidth="2"
-                  />
-                );
-              })}
-            </svg>
+        <Card title="Spektrum & Meter" wide>
+          <div className="spec">
+            {BANDS.map(([n], i) => (
+              <div key={n} className="bar"><div className="fill" style={{ clipPath: `inset(${100 - pct(meters.bands[i])}% 0 0 0)` }} />
+                {punk && <i className="tgt" style={{ bottom: `${pct(mean + PUNK_TARGET[i])}%` }} />}<span>{n}</span></div>))}
           </div>
-
-          {/* Slider 6-Band EQ */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '8px' }}>
-            {EQ_FREQS.map((freq, idx) => (
-              <div key={freq} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', backgroundColor: 'rgba(15,23,42,0.65)', padding: '8px 4px', borderRadius: '8px' }}>
-                <span style={{ fontSize: '10px', fontWeight: '700', color: '#e2e8f0' }}>
-                  {eqGains[idx] > 0 ? `+${eqGains[idx]}` : eqGains[idx]} dB
-                </span>
-                <input
-                  type="range"
-                  min="-12"
-                  max="12"
-                  step="0.5"
-                  value={eqGains[idx]}
-                  onChange={(e) => handleEqChange(idx, e.target.value)}
-                  style={{ width: '100%', margin: '8px 0', accentColor: accentColor, cursor: 'pointer' }}
-                />
-                <span style={{ fontSize: '10px', color: '#94a3b8' }}>{EQ_LABELS[idx]}</span>
-              </div>
-            ))}
+          <label className="chk"><input type="checkbox" checked={punk} onChange={e => setPunk(e.target.checked)} /> Tampilkan kurva target Punk / Alt-Rock (garis penanda)</label>
+          <div className="row">
+            <div className="meter"><span>Peak</span><b className={meters.peak > -1 ? 'warn' : ''}>{meters.peak > -119 ? meters.peak.toFixed(1) : '−∞'} dB</b></div>
+            <div className="meter grow"><span>Korelasi stereo</span>
+              <div className="corr"><i style={{ left: `${(meters.corr + 1) * 50}%` }} /></div>
+              <b>{meters.corr.toFixed(2)}</b></div>
           </div>
-        </div>
+        </Card>
 
-        {/* Spectrum & Peak Meter */}
-        <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr', gap: '14px', marginBottom: '16px' }}>
-          <div style={cardStyle}>
-            <div style={{ fontSize: '12px', fontWeight: '700', marginBottom: '12px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Spektrum Frekuensi</div>
-            <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-around', height: '115px', backgroundColor: '#090d16', padding: '12px', borderRadius: '10px' }}>
-              {['Sub', 'Bass', 'Low-Mid', 'High-Mid', 'Treble'].map((label, i) => (
-                <div key={label} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '18%' }}>
-                  <div style={{ width: '48%', height: `${freqBars[i]}px`, background: activeTrack === 'A' ? 'linear-gradient(180deg, #38bdf8, #0284c7)' : 'linear-gradient(180deg, #e879f9, #9333ea)', borderRadius: '4px 4px 0 0', transition: 'height 0.07s' }} />
-                  <span style={{ fontSize: '10px', color: '#94a3b8', marginTop: '6px' }}>{label}</span>
-                </div>
-              ))}
-            </div>
+        <Card title="Equalizer 6-Band" wide>
+          <EqPanel bands={bands} setBands={setBands} eqOn={eqOn} setEqOn={setEqOn} scope={eqScope} setScope={setEqScope}
+            sel={selBand} setSel={setSelBand} flash={flash} specCurve={specCurve} />
+        </Card>
+
+        <Card title="Monitoring">
+          <p className="lbl">Simulasi perangkat</p>
+          <Seg value={device} onChange={setDevice} options={Object.entries(DEVICES).map(([k, v]) => [k, v.n])} />
+          <p className="lbl">Isolasi band</p>
+          <Seg value={solo} onChange={setSolo} options={[['off', 'Off'], ['low', 'Solo Low'], ['mid', 'Solo Mid'], ['high', 'Solo High']]} />
+          <p className="lbl">Kanal</p>
+          <Seg value={ch} onChange={setCh} options={[['stereo', 'Stereo'], ['mono', 'Mono / Mid'], ['side', 'Solo Side']]} />
+          <label className="chk"><input type="checkbox" checked={vocalRm} onChange={e => setVocalRm(e.target.checked)} /> Vocal Remover (center cancel; bass &amp; kick ikut berkurang)</label>
+          <label className="chk"><input type="checkbox" checked={spot} onChange={e => setSpot(e.target.checked)} /> Normalisasi Spotify −14 LUFS (estimasi)</label>
+          <Slider label="Volume keluar" value={outVol} onChange={setOutVol} show={`${Math.round(outVol * 100)}%`} />
+          <label className="chk"><input type="checkbox" checked={limiter} onChange={e => setLimiter(e.target.checked)} /> Pelindung telinga (limiter) untuk IEM</label>
+        </Card>
+
+        <Card title="Simulasi Kebisingan">
+          <Seg value={noise.mode} onChange={m => setNoise(n => ({ ...n, mode: m }))} options={[['off', 'Off'], ['cafe', 'Kafe'], ['street', 'Jalanan']]} />
+          <Slider label="Level" value={noise.level} onChange={v => setNoise(n => ({ ...n, level: v }))} show={`${Math.round(noise.level * 100)}%`} />
+        </Card>
+
+        <Card title="Metronom">
+          <div className="row">
+            <button className={met.on ? 'on' : ''} onClick={toggleMet}>{met.on ? 'Berhenti' : 'Mulai'}</button>
+            <button onClick={tap}>Tap tempo</button>
+            <button disabled={!cur?.bpm} onClick={() => setMet(m => ({ ...m, bpm: Math.round(cur.bpm * rate) }))}>Ikuti lagu ({cur?.bpm ? Math.round(cur.bpm * rate) : '—'})</button>
           </div>
+          <Slider label="BPM" min={40} max={220} step={1} value={met.bpm} onChange={v => setMet(m => ({ ...m, bpm: v }))} show={`${met.bpm}`} />
+          <Slider label="Volume" value={met.vol} onChange={v => setMet(m => ({ ...m, vol: v }))} show={`${Math.round(met.vol * 100)}%`} />
+        </Card>
 
-          <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ fontSize: '12px', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase' }}>Peak Level</div>
-            <div style={{ width: '28px', height: '95px', backgroundColor: '#090d16', borderRadius: '8px', padding: '3px', display: 'flex', alignItems: 'flex-end' }}>
-              <div style={{ width: '100%', height: `${Math.max(5, ((peakDb + 60) / 60) * 100)}%`, backgroundColor: peakDb > -1 ? '#ef4444' : peakDb > -6 ? '#f59e0b' : '#10b981', borderRadius: '5px', transition: 'height 0.07s' }} />
-            </div>
-            <div style={{ fontSize: '12px', fontWeight: '700', color: peakDb > -1 ? '#ef4444' : '#f8fafc' }}>{peakDb.toFixed(1)} dB</div>
+        <Card title="Catatan Revisi" wide>
+          <div className="row">
+            <input className="txt" value={noteText} placeholder={`Catatan di ${fmt(pos)}…`} onChange={e => setNoteText(e.target.value)} onKeyDown={e => e.key === 'Enter' && addNote()} />
+            <button className="primary" onClick={addNote}><StickyNote size={14} /> Tambah</button>
+            <button onClick={copyReport} disabled={!notes.length}><Copy size={14} /> Salin Laporan WA</button>
           </div>
-        </div>
+          {!notes.length && <small className="hint">Belum ada catatan. Putar lagu, lalu tulis temuan di titik waktunya.</small>}
+          <ul className="notes">{notes.map((n, i) => (
+            <li key={i}><button onClick={() => seek(n.t)}>{fmt(n.t)}</button><span>{n.text}</span>
+              <button aria-label="Hapus catatan" onClick={() => setNotes(x => x.filter((_, j) => j !== i))}><Trash2 size={13} /></button></li>))}</ul>
+        </Card>
+      </main>}
 
-        {/* Simulasi Perangkat & Mono Check */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '14px', marginBottom: '16px' }}>
-          <div style={cardStyle}>
-            <div style={{ fontSize: '12px', fontWeight: '700', marginBottom: '10px', color: '#94a3b8', textTransform: 'uppercase' }}>Simulasi Perangkat</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-              {[
-                { id: 'studio', label: 'Studio Flat', icon: <Headphones size={14} /> },
-                { id: 'phone', label: 'Speaker HP', icon: <Smartphone size={14} /> },
-                { id: 'car', label: 'Audio Mobil', icon: <Car size={14} /> },
-                { id: 'club', label: 'Sound Live', icon: <Speaker size={14} /> }
-              ].map((d) => (
-                <button key={d.id} onClick={() => setDeviceMode(d.id)} style={{ backgroundColor: deviceMode === d.id ? '#0284c7' : '#1e293b', color: '#fff', border: '1px solid #334155', padding: '9px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  {d.icon} {d.label}
-                </button>
-              ))}
-            </div>
+      {tab === 2 && <main>
+        <Card title="Potong Audio Promo">
+          <p className="lbl">Durasi</p>
+          <Seg value={promoLen} onChange={setPromoLen} options={[[15, '15 detik'], [30, '30 detik'], [60, '60 detik']]} />
+          <Slider label="Kustom" min={1} max={Math.max(5, Math.min(300, Math.floor(dur) || 60))} step={1} value={promoLen}
+            onChange={setPromoLen} show={`${promoLen} detik`} />
+          <p className="lbl">Mulai dari</p>
+          <div className="row">
+            <button className={promoStart == null ? 'on' : ''} onClick={() => setPromoStart(null)}>Otomatis</button>
+            <button onClick={() => setPromoStart(pos)}>Posisi sekarang ({fmt(pos)})</button>
+            <button disabled={loop.a == null} onClick={() => setPromoStart(loop.a)}>Loop A</button>
+            <button disabled={!loopOk(loop)} onClick={() => { setPromoStart(loop.a); setPromoLen(Math.max(1, Math.round(loop.b - loop.a))) }}>Pakai Loop A–B</button>
           </div>
-
-          <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-            <div>
-              <div style={{ fontSize: '12px', fontWeight: '700', marginBottom: '6px', color: '#94a3b8', textTransform: 'uppercase' }}>Kompatibilitas Fase</div>
-              <p style={{ fontSize: '12px', color: '#cbd5e1', margin: 0 }}>Cek apakah gitar atau vokal menghilang saat digabung ke 1 kanal.</p>
-            </div>
-            <button onClick={() => setIsMono(!isMono)} style={{ backgroundColor: isMono ? '#f59e0b' : '#1e293b', color: isMono ? '#000' : '#fff', border: '1px solid #334155', padding: '10px', borderRadius: '8px', fontWeight: '700', cursor: 'pointer', marginTop: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontSize: '12px' }}>
-              <Volume2 size={16} /> {isMono ? 'MONO AKTIF (Cek Fase)' : 'STEREO (Normal)'}
-            </button>
-          </div>
-        </div>
-
-        {/* Smart Mix Advisor */}
-        <div style={{ ...cardStyle, borderLeft: advisor.warn ? '4px solid #f59e0b' : '4px solid #10b981', display: 'flex', alignItems: 'center', gap: '12px' }}>
-          {advisor.warn ? <AlertTriangle color="#f59e0b" size={22} /> : <CheckCircle2 color="#10b981" size={22} />}
-          <div style={{ fontSize: '13px', color: '#e2e8f0' }}>{advisor.text}</div>
-        </div>
-
-      </div>
+          <Slider label="Titik mulai" min={0} max={Math.max(1, Math.floor(dur))} step={1} value={Math.floor(promoStart ?? 0)}
+            onChange={setPromoStart} show={promoStart == null ? 'otomatis' : fmt(promoStart)} />
+          <small className="hint">
+            Hasil: {fmt(promoStart ?? (loopOk(loop) ? loop.a : pos))} → {fmt(Math.min(dur, (promoStart ?? (loopOk(loop) ? loop.a : pos)) + promoLen))}.
+            Mode otomatis memakai Loop A, atau posisi putar jika Loop belum diatur. Fade-in 40 ms, fade-out 0,8 detik.
+          </small>
+          <button className="primary" onClick={cutPromo}><Scissors size={14} /> Potong &amp; unduh .wav</button>
+        </Card>
+        <Card title="Live Backing Track L/R">
+          <small className="hint">Pisahkan Track A stereo menjadi dua file mono: kiri (misal click/guide) dan kanan (misal backing) untuk dikirim ke mixer panggung.</small>
+          <button className="primary" onClick={splitLR}><Download size={14} /> Unduh L &amp; R</button>
+        </Card>
+        <Card title="Checklist Rilis SoundOn" wide>
+          <ul className="checks">{CHECKS.map((c, i) => (
+            <li key={i}><label><input type="checkbox" checked={checks.includes(i)} onChange={() => toggleCheck(i)} /> {c}</label></li>))}</ul>
+          <small className="hint">{checks.length} dari {CHECKS.length} selesai</small>
+        </Card>
+      </main>}
     </div>
-  );
+  )
 }
+
+/* ---------- Gaya ---------- */
+const CSS = `
+.app{min-height:100vh;color:var(--text);font:15px/1.5 "Segoe UI",system-ui,-apple-system,sans-serif;padding:20px 16px 56px;background:radial-gradient(900px 420px at 50% -140px,color-mix(in srgb,var(--acc) 24%,transparent),transparent),var(--bg)}
+.app *{box-sizing:border-box}
+header{display:flex;flex-wrap:wrap;gap:14px;justify-content:space-between;align-items:center;max-width:1100px;margin:0 auto 18px}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{display:flex;align-items:flex-end;gap:3px;width:38px;height:38px;padding:8px;border-radius:11px;background:var(--panel);border:1px solid var(--line);box-shadow:0 0 22px -2px color-mix(in srgb,var(--acc) 45%,transparent)}
+.logo i{flex:1;height:40%;background:var(--acc);border-radius:2px}
+.logo i:nth-child(2){height:90%}.logo i:nth-child(3){height:62%}
+.logo.live i{animation:eq .7s ease-in-out infinite alternate}
+.logo.live i:nth-child(2){animation-delay:.2s}.logo.live i:nth-child(3){animation-delay:.4s}
+@keyframes eq{to{height:96%}}
+h1{font-size:22px;line-height:1.1;margin:0;font-weight:700;letter-spacing:-.015em}
+header small{color:var(--mute)}
+h2{font-size:16px;margin:0;font-weight:650;letter-spacing:-.005em}
+nav{display:flex;gap:6px;max-width:1100px;margin:0 auto 18px;border-bottom:1px solid var(--line)}
+nav button{border:0;border-bottom:2px solid transparent;border-radius:8px 8px 0 0;margin-bottom:-1px;padding:10px 16px;color:var(--mute);background:transparent}
+nav button.on{background:transparent;color:var(--text);border-bottom-color:var(--acc);font-weight:600;box-shadow:none}
+main{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:16px;max-width:1100px;margin:0 auto}
+.card{display:flex;flex-direction:column;gap:12px;padding:18px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,color-mix(in srgb,var(--panel) 90%,#fff 10%),var(--panel) 60%);box-shadow:0 1px 0 rgba(255,255,255,.05) inset,0 18px 36px -24px #000}
+.card.wide{grid-column:1/-1}
+button{font:inherit;font-size:14px;display:inline-flex;gap:6px;align-items:center;padding:7px 13px;color:var(--text);background:color-mix(in srgb,var(--panel) 70%,#fff 6%);border:1px solid var(--line);border-radius:9px;cursor:pointer;transition:border-color .15s,background .15s}
+button:hover:not(:disabled){border-color:var(--acc)}
+button:active:not(:disabled){transform:translateY(1px)}
+button:disabled{opacity:.4;cursor:not-allowed}
+button.on,button.primary{background:var(--acc);color:var(--bg);border-color:var(--acc);font-weight:600;box-shadow:0 0 18px -4px color-mix(in srgb,var(--acc) 70%,transparent)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.play{border-radius:999px;padding:10px 22px;font-size:15px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:4px;padding:4px;align-self:flex-start;background:var(--bg);border:1px solid var(--line);border-radius:12px}
+.seg button{background:transparent;border:0;padding:6px 12px;color:var(--mute);box-shadow:none}
+.seg button.on{background:var(--acc);color:var(--bg);box-shadow:0 0 14px -4px var(--acc)}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.slots{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px}
+.slot{display:flex;flex-direction:column;gap:10px;padding:14px;background:var(--bg);border:1px solid var(--line);border-radius:12px;transition:border-color .2s,box-shadow .2s}
+.slot.act{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc),0 0 28px -8px var(--acc)}
+.sw{justify-content:flex-start;font-weight:600}
+.led{width:9px;height:9px;border-radius:50%;background:var(--line)}
+.slot.act .led{background:var(--acc);box-shadow:0 0 9px var(--acc)}
+.up{display:flex;gap:6px;align-items:center;color:var(--mute);cursor:pointer;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.up:hover{color:var(--text)}
+.sl{display:grid;grid-template-columns:92px 1fr 128px;gap:10px;align-items:center}
+.sl b{font-weight:500;color:var(--mute);text-align:right;font-size:13px;font-variant-numeric:tabular-nums}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:6px;border-radius:3px;background:linear-gradient(90deg,var(--acc) var(--p,50%),var(--line) var(--p,50%))}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:var(--text);border:3px solid var(--acc);box-shadow:0 0 12px -1px var(--acc);cursor:pointer}
+input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--text);border:3px solid var(--acc);cursor:pointer}
+input[type=checkbox]{accent-color:var(--acc);width:16px;height:16px;margin-top:3px}
+.wave{position:relative;height:84px;overflow:hidden;cursor:pointer;background:linear-gradient(180deg,var(--bg),color-mix(in srgb,var(--bg) 92%,var(--acc)));border:1px solid var(--line);border-radius:12px}
+.wave canvas{display:block;width:100%;height:100%;opacity:.8}
+.pl{position:absolute;top:0;bottom:0;left:0;background:color-mix(in srgb,var(--acc) 14%,transparent);pointer-events:none}
+.ph{position:absolute;top:0;bottom:0;width:2px;background:#fff;box-shadow:0 0 10px var(--acc),0 0 2px #fff}
+.lp{position:absolute;top:0;bottom:0;background:var(--acc);mix-blend-mode:screen;opacity:.25}
+.time{font-variant-numeric:tabular-nums;color:var(--mute);font-size:14px}
+.hint,small{color:var(--mute);font-size:13px}
+.lbl{margin:6px 0 0;color:var(--mute);font-size:13px}
+.chk{display:flex;gap:8px;align-items:flex-start;font-size:14px}
+.spec{display:flex;gap:10px;height:180px}
+.bar{position:relative;flex:1;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:repeating-linear-gradient(0deg,color-mix(in srgb,var(--line) 75%,transparent) 0 6px,transparent 6px 9px),var(--bg)}
+.fill{position:absolute;inset:0;transition:clip-path .08s linear;background:linear-gradient(0deg,var(--acc) 0 62%,#ffd166 84%,#ff5d5d);-webkit-mask:repeating-linear-gradient(0deg,#000 0 6px,transparent 6px 9px);mask:repeating-linear-gradient(0deg,#000 0 6px,transparent 6px 9px)}
+.tgt{position:absolute;left:0;right:0;height:0;border-top:2px dashed #fff;box-shadow:0 0 6px rgba(255,255,255,.6)}
+.bar span{position:absolute;bottom:5px;left:0;right:0;text-align:center;font-size:12px;font-weight:600;text-shadow:0 0 5px var(--bg),0 0 2px var(--bg)}
+.meter{display:flex;gap:10px;align-items:center}.meter.grow{flex:1;min-width:230px}
+.meter span{color:var(--mute);font-size:13px}
+.meter b{min-width:76px;padding:2px 10px;text-align:center;font-variant-numeric:tabular-nums;background:var(--bg);border:1px solid var(--line);border-radius:7px}
+.warn{color:#ff6b6b;border-color:#ff6b6b!important}
+.corr{position:relative;flex:1;height:8px;border-radius:4px;background:linear-gradient(90deg,#d6453d,var(--line) 50%,var(--acc))}
+.corr i{position:absolute;top:-4px;width:4px;height:16px;border-radius:2px;background:#fff;transform:translateX(-2px);box-shadow:0 0 8px #fff}
+.txt{flex:1;min-width:180px;padding:8px 12px;font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:9px}
+.notes,.checks{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.notes li{display:flex;gap:10px;align-items:center;padding:7px 10px;background:var(--bg);border:1px solid var(--line);border-radius:10px}
+.notes li span{flex:1}
+.notes li button:first-child{padding:2px 9px;color:var(--acc);font-variant-numeric:tabular-nums}
+.checks li{padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;transition:border-color .2s}
+.checks li:has(input:checked){border-color:var(--acc);color:var(--mute)}
+.checks label{display:flex;gap:10px;cursor:pointer}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:9;padding:9px 18px;font-weight:600;color:var(--bg);background:var(--acc);border-radius:10px;box-shadow:0 10px 30px -8px #000}
+@media(max-width:560px){.sl{grid-template-columns:76px 1fr}.sl b{grid-column:1/-1;text-align:left}.card{padding:14px}}
+@media(prefers-reduced-motion:reduce){.logo i,.fill{animation:none!important;transition:none}}
+/* ---- Responsif: PC, tablet, HP ---- */
+.app{padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right));padding-bottom:max(56px,calc(env(safe-area-inset-bottom) + 24px))}
+header,nav,main{max-width:1240px}
+.card{min-width:0}
+main{grid-template-columns:repeat(auto-fit,minmax(min(310px,100%),1fr))}
+nav{overflow-x:auto;scrollbar-width:none}
+nav button{flex:none;white-space:nowrap}
+@media(min-width:1400px){.app{font-size:16px}.spec{height:210px}.wave{height:100px}}
+@media(min-width:561px) and (max-width:1023px){
+  main{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .spec{height:170px}
+}
+@media(max-width:560px){
+  .app{padding-top:max(14px,env(safe-area-inset-top))}
+  header{flex-direction:column;align-items:stretch;gap:12px;margin-bottom:12px}
+  h1{font-size:19px}
+  nav{margin-bottom:12px}nav button{flex:1;padding:11px 10px}
+  .seg{display:flex;width:100%}
+  .seg button{flex:1 1 auto;justify-content:center;padding:8px 6px;font-size:13px}
+  .slots{grid-template-columns:1fr}
+  .wave{height:72px}
+  .spec{height:140px;gap:6px}.bar span{font-size:10px}
+  .row>.play{flex:1 1 100%;justify-content:center}
+  .row .time{margin-left:auto}
+  .meter.grow,.txt{min-width:100%}
+  .notes li{flex-wrap:wrap}
+}
+@media(max-height:480px) and (orientation:landscape){.app{padding-top:10px}.spec{height:110px}.wave{height:60px}}
+@media(pointer:coarse){
+  button{min-height:44px}.seg button{min-height:40px}.notes li button{min-height:36px}
+  input[type=range]{height:8px}
+  input[type=range]::-webkit-slider-thumb{width:26px;height:26px}
+  input[type=range]::-moz-range-thumb{width:20px;height:20px}
+  input[type=checkbox]{width:22px;height:22px}
+}
+/* ---- EQ interaktif, sumber lain, branding ---- */
+.eqg{display:block;width:100%;height:auto;touch-action:none;background:var(--bg);border:1px solid var(--line);border-radius:12px}
+.eqg.off{opacity:.45}
+.eqg .gl{stroke:var(--line);stroke-width:1}.eqg .z{stroke:var(--mute);stroke-dasharray:4 4}
+.eqg .gt{fill:var(--mute);font-size:11px}
+.eqg .ar{fill:color-mix(in srgb,var(--acc) 18%,transparent)}
+.eqg .cv{fill:none;stroke:var(--acc);stroke-width:2.5;stroke-linejoin:round;filter:drop-shadow(0 0 6px var(--acc))}
+.eqg .node{fill:var(--bg);stroke:var(--acc);stroke-width:3;pointer-events:none}
+.eqg .node.sel{fill:var(--acc)}
+.eqg .nt{fill:var(--text);font-size:12px;font-weight:700;text-anchor:middle;pointer-events:none}
+.eqg .nt.sel{fill:var(--bg)}
+.eqg .hit{cursor:grab;outline:none}.eqg .hit:focus-visible{stroke:var(--text);stroke-width:2}
+.bands{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(190px,100%),1fr));gap:10px}
+.band{display:flex;flex-direction:column;gap:8px;padding:12px;cursor:pointer;background:var(--bg);border:1px solid var(--line);border-radius:12px}
+.band.sel{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
+.band .sl{grid-template-columns:38px 1fr 62px;gap:6px}
+.band .sl b{grid-column:auto;text-align:right;font-size:12px}
+input:disabled{opacity:.35}
+.more summary{cursor:pointer;color:var(--mute);font-size:13px}
+.more>div{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.rec{background:#d6453d;border-color:#d6453d;color:#fff}
+.by{margin-left:6px;font-size:.55em;font-weight:500;color:var(--acc);white-space:nowrap}
+/* ---- Kunci, chord, metronom ---- */
+.keys{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:10px}
+.kbox{display:flex;flex-direction:column;gap:2px;padding:12px;background:var(--bg);border:1px solid var(--line);border-radius:12px}
+.kbox.act{border-color:var(--acc)}.kbox b{font-size:20px}
+.now{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.now span{font-size:42px;font-weight:700;line-height:1.1;color:var(--acc);letter-spacing:-.02em}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chips button{flex-direction:column;gap:0;align-items:center;padding:5px 10px;min-width:58px}
+.chips button small{font-size:11px;color:inherit;opacity:.75}
+`
