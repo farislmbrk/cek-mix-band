@@ -1332,6 +1332,7 @@ export default function App() {
 
   return (
     <div className="app" style={{ '--bg': T.bg, '--panel': T.panel, '--line': T.line, '--text': T.text, '--mute': T.mute, '--acc': T.acc }}>
+      <style>{CSS}</style>
       <header>
         <div className="brand">
           <span className={`logo${playing ? ' live' : ''}`}><i /><i /><i /></span>
@@ -1632,8 +1633,7 @@ export default function App() {
   )
 }
 
-/* ---------- Gaya ---------- */
-.app{min-height:100vh;color:var(--text);font:15px/1.5 "Inter","Segoe UI",system-ui,-apple-system,sans-serif;padding:22px 16px 60px;background:radial-gradient(960px 420px at 50% -130px,color-mix(in srgb,var(--acc) 18%,transparent),transparent),var(--bg)}
+const CSS = `.app{min-height:100vh;color:var(--text);font:15px/1.5 "Inter","Segoe UI",system-ui,-apple-system,sans-serif;padding:22px 16px 60px;background:radial-gradient(960px 420px at 50% -130px,color-mix(in srgb,var(--acc) 18%,transparent),transparent),var(--bg)}
 .app *{box-sizing:border-box}
 header{display:flex;flex-wrap:wrap;gap:14px;justify-content:space-between;align-items:center;max-width:1240px;margin:0 auto 16px;padding:14px 18px;border-radius:16px;background:color-mix(in srgb,var(--panel) 84%,transparent);border:1px solid var(--line)}
 .brand{display:flex;align-items:center;gap:12px}
@@ -1811,4 +1811,5 @@ input:disabled{opacity:.35}
   input[type=range]::-moz-range-thumb{width:20px;height:20px}
   input[type=checkbox]{width:22px;height:22px}
 }
-@media(prefers-reduced-motion:reduce){.logo i,.fill,.tuner-needle{animation:none!important;transition:none}}
+@media(prefers-reduced-motion:reduce){.logo i,.fill,.tuner-needle{animation:none!important;transition:none}}`
+
