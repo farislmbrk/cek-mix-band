@@ -24,12 +24,78 @@ const MATRIX = {
   stereo: [1, 0, 0, 1], mono: [.5, .5, .5, .5], side: [.5, -.5, .5, -.5],
 }
 const STEMS = {
-  full: { n: 'Full Mix', mat: 'stereo', hp: 10, lp: 20000, pkF: 1000, pkG: 0, pkQ: 1 },
-  vocal: { n: 'Vokal / Lead', mat: 'mono', hp: 220, lp: 6500, pkF: 2400, pkG: 4.5, pkQ: 0.9 },
-  bass: { n: 'Bass / Sub', mat: 'mono', hp: 15, lp: 230, pkF: 85, pkG: 4.0, pkQ: 1.1 },
-  drums: { n: 'Drums / Beat', mat: 'stereo', hp: 10, lp: 20000, pkF: 4500, pkG: 5.5, pkQ: 0.7 },
-  guitar: { n: 'Gitar / Side', mat: 'side', hp: 180, lp: 9500, pkF: 1800, pkG: 3.5, pkQ: 0.9 },
-  karaoke: { n: 'Instrumen (Minus Vocal)', mat: 'side', hp: 10, lp: 20000, pkF: 1400, pkG: -4.0, pkQ: 1.2 },
+  full: {
+    n: 'Full Mix',
+    desc: 'Sinyal penuh tanpa isolasi instrumen.',
+    mat: 'stereo', hp: 10, lp: 20000,
+    pk1F: 1000, pk1G: 0, pk1Q: 1.0,
+    pk2F: 3200, pk2G: 0, pk2Q: 1.0,
+    ntF: 1800, ntG: 0, ntQ: 1.0,
+  },
+  vocal: {
+    n: 'Vokal / Lead',
+    desc: 'Fokus mid-high vokal (240 Hz–6.2 kHz), menekan sub-bass & hi-hat ekstrem.',
+    mat: 'mono', hp: 240, lp: 6200,
+    pk1F: 1150, pk1G: 3.5, pk1Q: 1.1,
+    pk2F: 3100, pk2G: 5.5, pk2Q: 1.2,
+    ntF: 140, ntG: -6, ntQ: 1.5,
+  },
+  kick_sub: {
+    n: 'Kick & Sub',
+    desc: 'Isolasi frekuensi rendah 25–135 Hz untuk mengecek tendangan kick & sub-bass.',
+    mat: 'mono', hp: 25, lp: 135,
+    pk1F: 58, pk1G: 5.0, pk1Q: 1.3,
+    pk2F: 105, pk2G: 4.5, pk2Q: 1.4,
+    ntF: 450, ntG: -8, ntQ: 1.5,
+  },
+  bass_line: {
+    n: 'Bassline',
+    desc: 'Fokus body & fret/growl bass (45–360 Hz), memangkas cymbal/vokal atas.',
+    mat: 'mono', hp: 45, lp: 360,
+    pk1F: 95, pk1G: 4.5, pk1Q: 1.2,
+    pk2F: 240, pk2G: 3.0, pk2Q: 1.4,
+    ntF: 2500, ntG: -8, ntQ: 1.5,
+  },
+  drums_kit: {
+    n: 'Drums & Snare',
+    desc: 'Menonjolkan punch snare (180–350 Hz) dan attack/cymbal (3.8–14 kHz).',
+    mat: 'stereo', hp: 55, lp: 14500,
+    pk1F: 220, pk1G: 4.0, pk1Q: 1.4,
+    pk2F: 5200, pk2G: 5.5, pk2Q: 0.9,
+    ntF: 1100, ntG: -3.5, ntQ: 1.6,
+  },
+  cymbal_hihat: {
+    n: 'Hi-Hat & Cymbal',
+    desc: 'Fokus shimmer & transient atas (5.5–19 kHz), membuang low-mid & bass.',
+    mat: 'side', hp: 5500, lp: 19500,
+    pk1F: 8500, pk1G: 4.5, pk1Q: 1.0,
+    pk2F: 12500, pk2G: 5.0, pk2Q: 1.1,
+    ntF: 300, ntG: -10, ntQ: 1.2,
+  },
+  guitar_rhythm: {
+    n: 'Gitar Rhythm / Chord',
+    desc: 'Fokus mid-low & crunch gitar (190 Hz–4.8 kHz) pada sisi stereo.',
+    mat: 'side', hp: 190, lp: 4800,
+    pk1F: 620, pk1G: 3.5, pk1Q: 1.1,
+    pk2F: 2200, pk2G: 4.0, pk2Q: 1.2,
+    ntF: 100, ntG: -8, ntQ: 1.4,
+  },
+  lead_synth: {
+    n: 'Lead / Synth / Keys',
+    desc: 'Fokus artikulasi melodi/synth (420 Hz–9.5 kHz) dengan clarity di 2.8 kHz.',
+    mat: 'stereo', hp: 420, lp: 9500,
+    pk1F: 1500, pk1G: 3.5, pk1Q: 1.2,
+    pk2F: 3400, pk2G: 4.5, pk2Q: 1.3,
+    ntF: 120, ntG: -8, ntQ: 1.4,
+  },
+  karaoke: {
+    n: 'Minus Vocal (Instrumen)',
+    desc: 'Menekan vokal tengah (mid/center) dan notch area vokal utama.',
+    mat: 'side', hp: 20, lp: 19500,
+    pk1F: 1350, pk1G: -5.5, pk1Q: 1.2,
+    pk2F: 2800, pk2G: -4.5, pk2Q: 1.4,
+    ntF: 1850, ntG: -6, ntQ: 2.0,
+  },
 }
 const CHECKS = [
   'Master sudah dicek di speaker HP, earphone, dan speaker studio',
@@ -539,11 +605,14 @@ function createEngine() {
   bus.connect(sp2)
   for (let o = 0; o < 2; o++) for (let i = 0; i < 2; i++) { const g = ctx.createGain(); sp2.connect(g, i); g.connect(mg, 0, o); mx.push(g) }
 
-  const stHp = bq('highpass', 10), stLp = bq('lowpass', 20000), stPk = bq('peaking', 1000, 1)
+  const stHp = bq('highpass', 10, 0.85), stHp2 = bq('highpass', 10, 0.85)
+  const stLp = bq('lowpass', 20000, 0.85), stLp2 = bq('lowpass', 20000, 0.85)
+  const stPk = bq('peaking', 1000, 1.2), stPk2 = bq('peaking', 3200, 1.4), stNotch = bq('notch', 1800, 2.2)
   const sHp = bq('highpass', 10), sLp = bq('lowpass', 20000), dHp = bq('highpass', 10), dLp = bq('lowpass', 20000), dLs = bq('lowshelf', 120)
   const an = ctx.createAnalyser(); an.fftSize = 4096; an.smoothingTimeConstant = 0.8
   const master = ctx.createGain()
-  mg.connect(stHp); stHp.connect(stLp); stLp.connect(stPk); stPk.connect(sHp)
+  mg.connect(stHp); stHp.connect(stHp2); stHp2.connect(stLp); stLp.connect(stLp2)
+  stLp2.connect(stPk); stPk.connect(stPk2); stPk2.connect(stNotch); stNotch.connect(sHp)
   sHp.connect(sLp); sLp.connect(dHp); dHp.connect(dLp); dLp.connect(dLs); dLs.connect(an); an.connect(master)
 
   const outVol = ctx.createGain(), limDirect = ctx.createGain(), limComp = ctx.createGain(), comp = ctx.createDynamicsCompressor()
@@ -561,7 +630,7 @@ function createEngine() {
   lfo.connect(lfoG); lfoG.connect(nGain.gain); ns.start(); lfo.start()
 
   master.gain.value = 1
-  return { ctx, pre, direct, shifted, outVol, limDirect, limComp, eqA, eqB, gA, gB, master, mx, anL, anR, an, stHp, stLp, stPk, sHp, sLp, dHp, dLp, dLs, nFilter, nGain, lfoG }
+  return { ctx, pre, direct, shifted, outVol, limDirect, limComp, eqA, eqB, gA, gB, master, mx, anL, anR, an, stHp, stHp2, stLp, stLp2, stPk, stPk2, stNotch, sHp, sLp, dHp, dLp, dLs, nFilter, nGain, lfoG }
 }
 
 /* ---------- Komponen kecil ---------- */
@@ -1364,6 +1433,7 @@ function InstrumentChordScaleDict({ detectedKey, transpose = 0 }) {
 export default function App() {
   const [theme, setTheme] = useState('midnight')
   const [tab, setTab] = useState(1)
+  const [subTab, setSubTab] = useState('all')
   const [ready, setReady] = useState(false)
   const [files, setFiles] = useState({ A: null, B: null })
   const [active, setActive] = useState('A')
@@ -1382,6 +1452,7 @@ export default function App() {
   const [tr, setTr] = useState({ A: 0, B: 0 })
   const [chordMode, setChordMode] = useState('extended')
   const [stemMode, setStemMode] = useState('full')
+  const [stemDepth, setStemDepth] = useState(0.85)
 
 
 
@@ -1409,6 +1480,7 @@ export default function App() {
     clipped: false,
   })
   const [holdPeaks, setHoldPeaks] = useState(true)
+  const [meterScale, setMeterScale] = useState('zoom')
   const [showTargetValues, setShowTargetValues] = useState(true)
   const peakHoldRef = useRef([-90, -90, -90, -90, -90])
   const maxPeakRef = useRef(-120)
@@ -1587,15 +1659,25 @@ export default function App() {
     if (!ready) return
     const e = eng.current
     const st = STEMS[stemMode] || STEMS.full
+    const d = stemMode === 'full' ? 0 : stemDepth
     const matKey = vocalRm ? 'side' : (stemMode !== 'full' ? st.mat : ch)
     const m = MATRIX[matKey]
     e.mx.forEach((g, i) => set(g.gain, m[i], 0.01))
-    set(e.stHp.frequency, st.hp)
-    set(e.stLp.frequency, st.lp)
-    set(e.stPk.frequency, st.pkF)
-    set(e.stPk.gain, st.pkG)
-    set(e.stPk.Q, st.pkQ)
-  }, [ch, vocalRm, stemMode, ready])
+    const hpFreq = 10 + (st.hp - 10) * d
+    const lpFreq = 20000 - (20000 - st.lp) * d
+    set(e.stHp.frequency, hpFreq)
+    set(e.stHp2.frequency, hpFreq)
+    set(e.stLp.frequency, lpFreq)
+    set(e.stLp2.frequency, lpFreq)
+    set(e.stPk.frequency, st.pk1F)
+    set(e.stPk.gain, st.pk1G * d)
+    set(e.stPk.Q, st.pk1Q)
+    set(e.stPk2.frequency, st.pk2F)
+    set(e.stPk2.gain, st.pk2G * d)
+    set(e.stPk2.Q, st.pk2Q)
+    set(e.stNotch.frequency, st.ntF)
+    set(e.stNotch.Q, st.ntQ)
+  }, [ch, vocalRm, stemMode, stemDepth, ready])
 
   useEffect(() => {
     if (!ready) return
@@ -1776,7 +1858,8 @@ export default function App() {
 
   const T = THEMES[theme]
   const mean = meters.bands.reduce((a, b) => a + b, 0) / 5
-  const pct = v => Math.max(0, Math.min(100, ((v + 100) / 100) * 100))
+  const floorDb = meterScale === 'zoom' ? -75 : -100
+  const pct = v => Math.max(0, Math.min(100, ((v - floorDb) / (0 - floorDb)) * 100))
   const semis = 12 * Math.log2(rate)
 
   return (
@@ -1791,10 +1874,19 @@ export default function App() {
       </header>
       <nav><button className={tab === 1 ? 'on' : ''} onClick={() => setTab(1)}>Mix &amp; Referensi</button>
         <button className={tab === 2 ? 'on' : ''} onClick={() => setTab(2)}>Promo, Live &amp; Rilis</button></nav>
-      {msg && <div className="toast">{msg}</div>}
+           {tab === 1 && (
+        <div className="subnav" role="tablist" aria-label="Sub menu Mix & Referensi">
+          <button className={subTab === 'all' ? 'on' : ''} onClick={() => setSubTab('all')}>Semua</button>
+          <button className={subTab === 'player' ? 'on' : ''} onClick={() => setSubTab('player')}>Player &amp; Stem</button>
+          <button className={subTab === 'tone' ? 'on' : ''} onClick={() => setSubTab('tone')}>Spektrum, EQ &amp; Tone</button>
+          <button className={subTab === 'tools' ? 'on' : ''} onClick={() => setSubTab('tools')}>Tuner, Tempo &amp; Catatan</button>
+        </div>
+      )}
 
       {tab === 1 && <main>
-        <Card title="Pemutar A/B" wide>
+        {(subTab === 'all' || subTab === 'player') && (
+          <>
+            <Card title="Pemutar A/B" wide>
           <div className="slots">
             {['A', 'B'].map(x => (
               <div key={x} className={`slot${active === x ? ' act' : ''}`}>
@@ -1836,45 +1928,40 @@ export default function App() {
           <label className="chk"><input type="checkbox" checked={keepPitch} onChange={e => setKeepPitch(e.target.checked)} /> Jaga nada saat kecepatan berubah (cocok untuk latihan)</label>
           {keepPitch && !pitchOk && <small className="hint">Pitch shifter belum siap atau tidak didukung browser ini, jadi nada ikut berubah seperti kaset.</small>}
         </Card>
-
-        <Card title="Pemisah Instrumen (Stem Isolator)" wide>
+            <Card title="Pemisah Instrumen (Stem Isolator)" wide>
           <Seg value={stemMode} onChange={setStemMode} options={Object.entries(STEMS).map(([k, v]) => [k, v.n])} />
-          <small className="hint">Pisahkan elemen instrumen secara real-time (Vokal/Lead, Bass/Sub, Drums/Beat, Gitar/Side, atau Minus Vocal) menggunakan pemrosesan Mid-Side dan filter frekuensi tanpa mengubah file asli.</small>
-        </Card>
-
-        <Card title="Kunci, Transpose & Kamus Chord / Scale" wide>
+          <Slider
+            label="Kedalaman Isolasi"
+            min={0}
+            max={1}
+            step={0.05}
+            value={stemDepth}
+            disabled={stemMode === 'full'}
+            onChange={setStemDepth}
+            show={`${Math.round(stemDepth * 100)}%`}
+          />
           <div className="row">
-            <small>Jenis deteksi harmoni</small>
-            <Seg value={chordMode} onChange={setChordMode} options={[['basic', 'Dasar'], ['extended', 'Extended']]} />
+            <small className="hint">{(STEMS[stemMode] || STEMS.full).desc}</small>
+            {stemMode !== 'full' && (
+              <button onClick={() => setStemMode('full')}>Kembali ke Full Mix</button>
+            )}
           </div>
-          <div className="keys">
-            {['A', 'B'].map(x => {
-              const h = files[x]?.harm
-              return (
-                <div key={x} className={`kbox${active === x ? ' act' : ''}`}>
-                  <small>Track {x} · {x === 'A' ? 'Mix Band' : 'Referensi'}</small>
-                  {!files[x] ? <b>—</b> : !h ? <b>menganalisis…</b> : (<>
-                    <b>{keyName(h.key, tr[x])}</b>
-                    <small>{tr[x] !== 0 && `asli ${keyName(h.key)} · `}relatif {keyName(relKey(h.key), tr[x])} · keyakinan {h.key.conf}</small></>)}
-                </div>)
-            })}
-          </div>
-          <Slider label="Transpose" min={-12} max={12} step={1} value={trA} onChange={v => setTr(o => ({ ...o, [active]: v }))}
-            show={`${trA > 0 ? '+' : ''}${trA} semiton`} />
-          <div className="row">
-            <button onClick={() => setTr(o => ({ ...o, [active]: Math.max(-12, o[active] - 1) }))}>−1</button>
-            <button onClick={() => setTr(o => ({ ...o, [active]: Math.min(12, o[active] + 1) }))}>+1</button>
-            <button onClick={() => setTr(o => ({ ...o, [active]: 0 }))}>Reset</button>
-            <button onClick={matchKey}>Samakan kunci B ke A</button>
-            <small>Berlaku untuk Track {active}. {pitchOk ? '' : 'Pitch shifter belum siap.'}</small>
-          </div>
-
-          <InstrumentChordScaleDict detectedKey={harm?.key} transpose={trA} />
+          <small className="hint">Karena pemrosesan berjalan real-time di browser tanpa model neural berat, beberapa instrumen yang berbagi rentang frekuensi/panning tetap menyisakan sedikit bleed alami.</small>
         </Card>
+          </>
+        )}
 
-        <Card title="Spektrum & Meter" wide>
+        {(subTab === 'all' || subTab === 'tone') && (
+          <>
+            <Card title="Spektrum & Meter" wide>
           <div className="spec-toolbar">
             <div className="row">
+              <button
+                className={meterScale === 'zoom' ? 'on' : ''}
+                onClick={() => setMeterScale(s => (s === 'zoom' ? 'full' : 'zoom'))}
+              >
+                Skala: {meterScale === 'zoom' ? 'Detail (-75..0 dB)' : 'Penuh (-100..0 dB)'}
+              </button>
               <button className={holdPeaks ? 'on' : ''} onClick={() => setHoldPeaks(h => !h)}>
                 Peak Hold: {holdPeaks ? 'ON' : 'OFF'}
               </button>
@@ -1902,11 +1989,23 @@ export default function App() {
 
           <div className="spec-board">
             <div className="spec-scale" aria-hidden="true">
-              <span>0 dB</span>
-              <span>-25</span>
-              <span>-50</span>
-              <span>-75</span>
-              <span>-100</span>
+              {meterScale === 'zoom' ? (
+                <>
+                  <span>0 dB</span>
+                  <span>-18</span>
+                  <span>-37</span>
+                  <span>-56</span>
+                  <span>-75</span>
+                </>
+              ) : (
+                <>
+                  <span>0 dB</span>
+                  <span>-25</span>
+                  <span>-50</span>
+                  <span>-75</span>
+                  <span>-100</span>
+                </>
+              )}
             </div>
 
             <div className="spec">
@@ -1926,7 +2025,7 @@ export default function App() {
 
                     <div className="bar">
                       <div className="fill" style={{ clipPath: `inset(${100 - barPct}% 0 0 0)` }} />
-                      {holdPeaks && meters.bandPeaks[i] > -98 && (
+                      {holdPeaks && meters.bandPeaks[i] > floorDb + 1 && (
                         <i className="pk-marker" style={{ bottom: `${holdPct}%` }} title={`Peak Band: ${meters.bandPeaks[i].toFixed(1)} dB`} />
                       )}
                       {punk && (
@@ -1998,13 +2097,40 @@ export default function App() {
             </div>
           </div>
         </Card>
-
-        <Card title="Equalizer 6-Band" wide>
+            <Card title="Equalizer 6-Band" wide>
           <EqPanel bands={bands} setBands={setBands} eqOn={eqOn} setEqOn={setEqOn} scope={eqScope} setScope={setEqScope}
             sel={selBand} setSel={setSelBand} flash={flash} specCurve={specCurve} />
         </Card>
+            <Card title="Kunci, Transpose & Kamus Chord / Scale" wide>
+          <div className="row">
+            <small>Jenis deteksi harmoni</small>
+            <Seg value={chordMode} onChange={setChordMode} options={[['basic', 'Dasar'], ['extended', 'Extended']]} />
+          </div>
+          <div className="keys">
+            {['A', 'B'].map(x => {
+              const h = files[x]?.harm
+              return (
+                <div key={x} className={`kbox${active === x ? ' act' : ''}`}>
+                  <small>Track {x} · {x === 'A' ? 'Mix Band' : 'Referensi'}</small>
+                  {!files[x] ? <b>—</b> : !h ? <b>menganalisis…</b> : (<>
+                    <b>{keyName(h.key, tr[x])}</b>
+                    <small>{tr[x] !== 0 && `asli ${keyName(h.key)} · `}relatif {keyName(relKey(h.key), tr[x])} · keyakinan {h.key.conf}</small></>)}
+                </div>)
+            })}
+          </div>
+          <Slider label="Transpose" min={-12} max={12} step={1} value={trA} onChange={v => setTr(o => ({ ...o, [active]: v }))}
+            show={`${trA > 0 ? '+' : ''}${trA} semiton`} />
+          <div className="row">
+            <button onClick={() => setTr(o => ({ ...o, [active]: Math.max(-12, o[active] - 1) }))}>−1</button>
+            <button onClick={() => setTr(o => ({ ...o, [active]: Math.min(12, o[active] + 1) }))}>+1</button>
+            <button onClick={() => setTr(o => ({ ...o, [active]: 0 }))}>Reset</button>
+            <button onClick={matchKey}>Samakan kunci B ke A</button>
+            <small>Berlaku untuk Track {active}. {pitchOk ? '' : 'Pitch shifter belum siap.'}</small>
+          </div>
 
-        <Card title="Monitoring">
+          <InstrumentChordScaleDict detectedKey={harm?.key} transpose={trA} />
+        </Card>
+            <Card title="Monitoring">
           <p className="lbl">Simulasi perangkat</p>
           <Seg value={device} onChange={setDevice} options={Object.entries(DEVICES).map(([k, v]) => [k, v.n])} />
           <p className="lbl">Isolasi band</p>
@@ -2016,13 +2142,15 @@ export default function App() {
           <Slider label="Volume keluar" value={outVol} onChange={setOutVol} show={`${Math.round(outVol * 100)}%`} />
           <label className="chk"><input type="checkbox" checked={limiter} onChange={e => setLimiter(e.target.checked)} /> Pelindung telinga (limiter) untuk IEM</label>
         </Card>
+          </>
+        )}
 
-        <Card title="Simulasi Kebisingan">
-          <Seg value={noise.mode} onChange={m => setNoise(n => ({ ...n, mode: m }))} options={[['off', 'Off'], ['cafe', 'Kafe'], ['street', 'Jalanan']]} />
-          <Slider label="Level" value={noise.level} onChange={v => setNoise(n => ({ ...n, level: v }))} show={`${Math.round(noise.level * 100)}%`} />
+        {(subTab === 'all' || subTab === 'tools') && (
+          <>
+            <Card title="Tuner Instrumen (Mic & Nada Acuan)">
+          <TunerPanel flash={flash} />
         </Card>
-
-        <Card title="Metronom">
+            <Card title="Metronom">
           <div className="row">
             <button className={met.on ? 'on' : ''} onClick={toggleMet}>{met.on ? 'Berhenti' : 'Mulai'}</button>
             <button onClick={tap}>Tap tempo</button>
@@ -2031,12 +2159,11 @@ export default function App() {
           <Slider label="BPM" min={40} max={220} step={1} value={met.bpm} onChange={v => setMet(m => ({ ...m, bpm: v }))} show={`${met.bpm}`} />
           <Slider label="Volume" value={met.vol} onChange={v => setMet(m => ({ ...m, vol: v }))} show={`${Math.round(met.vol * 100)}%`} />
         </Card>
-
-        <Card title="Tuner Instrumen (Mic & Nada Acuan)">
-          <TunerPanel flash={flash} />
+            <Card title="Simulasi Kebisingan">
+          <Seg value={noise.mode} onChange={m => setNoise(n => ({ ...n, mode: m }))} options={[['off', 'Off'], ['cafe', 'Kafe'], ['street', 'Jalanan']]} />
+          <Slider label="Level" value={noise.level} onChange={v => setNoise(n => ({ ...n, level: v }))} show={`${Math.round(noise.level * 100)}%`} />
         </Card>
-
-        <Card title="Catatan Revisi" wide>
+            <Card title="Catatan Revisi" wide>
           <div className="row">
             <input className="txt" value={noteText} placeholder={`Catatan di ${fmt(pos)}…`} onChange={e => setNoteText(e.target.value)} onKeyDown={e => e.key === 'Enter' && addNote()} />
             <button className="primary" onClick={addNote}><StickyNote size={14} /> Tambah</button>
@@ -2047,6 +2174,11 @@ export default function App() {
             <li key={i}><button onClick={() => seek(n.t)}>{fmt(n.t)}</button><span>{n.text}</span>
               <button aria-label="Hapus catatan" onClick={() => setNotes(x => x.filter((_, j) => j !== i))}><Trash2 size={13} /></button></li>))}</ul>
         </Card>
+          </>
+        )}
+      </main>}
+
+      {tab === 2 && <main>ard>
       </main>}
 
       {tab === 2 && <main>
@@ -2102,6 +2234,9 @@ h2::before{content:'';width:4px;height:15px;border-radius:99px;background:var(--
 nav{display:flex;gap:6px;max-width:1240px;width:100%;margin:0 auto 16px;padding:4px;border-radius:12px;background:var(--panel);border:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
 nav button{flex:1 1 0;white-space:nowrap;justify-content:center;border:0;border-radius:9px;padding:9px 14px;color:var(--mute);background:transparent;font-weight:500}
 nav button.on{background:var(--acc);color:var(--bg);font-weight:650}
+.subnav{display:flex;flex-wrap:wrap;gap:6px;max-width:1240px;width:100%;margin:0 auto 14px;padding:4px;border-radius:11px;background:color-mix(in srgb,var(--panel) 72%,var(--bg));border:1px solid var(--line)}
+.subnav button{flex:1 1 130px;border:0;border-radius:8px;padding:7px 12px;font-size:13px;color:var(--mute);background:transparent}
+.subnav button.on{background:color-mix(in srgb,var(--acc) 20%,var(--panel));color:var(--text);border:1px solid color-mix(in srgb,var(--acc) 55%,transparent);font-weight:650}
 main{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;max-width:1240px;width:100%;margin:0 auto}
 .card{min-width:0;width:100%;display:flex;flex-direction:column;gap:12px;padding:16px;border:1px solid var(--line);border-radius:16px;background:var(--panel);transition:border-color .16s ease}
 .card:hover{border-color:color-mix(in srgb,var(--acc) 38%,var(--line))}
@@ -2150,7 +2285,7 @@ input[type=checkbox]{accent-color:var(--acc);width:16px;height:16px;margin-top:3
 .band-top-readout{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:28px;line-height:1.1;font-variant-numeric:tabular-nums;text-align:center;width:100%}
 .band-top-readout b{font-size:11.5px;font-weight:700;color:var(--text);white-space:nowrap}
 .band-top-readout small{font-size:9.5px;color:var(--mute);line-height:1}
-.bar{position:relative;width:100%;height:160px;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:repeating-linear-gradient(0deg,color-mix(in srgb,var(--line) 75%,transparent) 0 6px,transparent 6px 9px),color-mix(in srgb,var(--panel) 70%,var(--bg))}
+.bar{position:relative;width:100%;height:220px;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:repeating-linear-gradient(0deg,color-mix(in srgb,var(--line) 75%,transparent) 0 6px,transparent 6px 9px),color-mix(in srgb,var(--panel) 70%,var(--bg))}
 .fill{position:absolute;inset:0;transition:clip-path .08s linear;background:linear-gradient(0deg,var(--acc) 0 62%,#ffd166 84%,#ff5d5d);-webkit-mask:repeating-linear-gradient(0deg,#000 0 6px,transparent 6px 9px);mask:repeating-linear-gradient(0deg,#000 0 6px,transparent 6px 9px)}
 .pk-marker{position:absolute;left:2px;right:2px;height:2px;background:var(--text);border-radius:99px;pointer-events:none;box-shadow:0 0 4px var(--bg)}
 .tgt{position:absolute;left:0;right:0;height:0;border-top:2px dashed #ffd166;pointer-events:none}
@@ -2273,7 +2408,7 @@ input:disabled{opacity:.35}
 .chips button{flex-direction:column;gap:0;align-items:center;padding:5px 8px;min-width:48px}
 .chips button small{font-size:10.5px;color:inherit;opacity:.75}
 
-@media(min-width:1400px){.app{font-size:16px}.bar{height:190px}.wave{height:100px}}
+@media(min-width:1400px){.app{font-size:16px}.bar{height:255px}.wave{height:100px}}
 @media(max-width:900px){
   main{grid-template-columns:minmax(0,1fr)}
   .slots{grid-template-columns:minmax(0,1fr)}
@@ -2295,7 +2430,7 @@ input:disabled{opacity:.35}
   .spec-board{grid-template-columns:32px minmax(0,1fr);gap:6px;padding:10px 8px}
   .spec-scale{font-size:9.5px;padding:26px 0 68px}
   .spec{gap:4px}
-  .bar{height:132px;border-radius:8px}
+  .bar{height:175px;border-radius:8px}
   .band-top-readout b{font-size:10.5px}
   .band-top-readout small{font-size:8.5px}
   .band-name{font-size:10.5px}
